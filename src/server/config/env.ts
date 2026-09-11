@@ -18,6 +18,8 @@ const schema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
 
   ANTHROPIC_API_KEY: z.string().optional(),
+  /** Alternative credential the SDK resolves on its own. */
+  ANTHROPIC_AUTH_TOKEN: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
   RESEND_WEBHOOK_SECRET: z.string().optional(),
 
@@ -91,7 +93,10 @@ export const features = {
     return Boolean(env.NEXT_PUBLIC_SUPABASE_URL && env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
   },
   get ai() {
-    return Boolean(env.ANTHROPIC_API_KEY);
+    // Either credential the SDK understands. An `ant auth login` profile is
+    // not visible here, so a key or token remains the supported path for a
+    // deployment; the client itself still falls back to a profile if present.
+    return Boolean(env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN);
   },
   get email() {
     return Boolean(env.RESEND_API_KEY);

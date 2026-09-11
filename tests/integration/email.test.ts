@@ -48,6 +48,25 @@ const acceptsEach = (): SendResult | ((n: number) => SendResult) => (n: number) 
   providerMessageId: `prov_${Date.now()}_${n}`,
 });
 
+/**
+ * Drains until this message has been processed, or gives up.
+ *
+ * One call to drainOutbox takes the OLDEST messages up to its batch limit,
+ * which is right for production and means a backlog can push a brand-new
+ * message out of the first batch. A real worker gets there on the next tick;
+ * so does this.
+ */
+async function drainUntilProcessed(sql: Sql, email: string, maxTicks = 12): Promise<void> {
+  for (let tick = 0; tick < maxTicks; tick++) {
+    const [row] = await sql<{ status: string }[]>`
+      SELECT status FROM email_messages WHERE to_email = ${email}
+    `;
+    if (row && row.status !== 'queued') return;
+    const report = await drainOutbox();
+    if (report.claimed === 0) return;
+  }
+}
+
 /** The id the provider actually assigned to this message. */
 async function providerIdFor(sql: Sql, email: string): Promise<string> {
   const [row] = await sql<{ provider_message_id: string }[]>`
@@ -116,7 +135,7 @@ describe('sending', () => {
     await queueOne(email);
 
     setEmailProvider(new RecordingProvider(acceptsEach()));
-    await drainOutbox();
+    await drainUntilProcessed(admin, email);
 
     const [row] = await admin<{ status: string; provider_message_id: string; delivered_at: Date | null }[]>`
       SELECT status, provider_message_id, delivered_at FROM email_messages WHERE to_email = ${email}
@@ -132,7 +151,7 @@ describe('sending', () => {
     await queueOne(email);
 
     setEmailProvider(new RecordingProvider({ accepted: false, error: '503 upstream', retryable: true }));
-    await drainOutbox();
+    await drainUntilProcessed(admin, email);
 
     const [row] = await admin<{ status: string; attempts: number; scheduled_for: Date }[]>`
       SELECT status, attempts, scheduled_for FROM email_messages WHERE to_email = ${email}
@@ -149,7 +168,7 @@ describe('sending', () => {
     setEmailProvider(
       new RecordingProvider({ accepted: false, error: '422 invalid recipient', retryable: false }),
     );
-    await drainOutbox();
+    await drainUntilProcessed(admin, email);
 
     const [row] = await admin<{ status: string; last_error: string }[]>`
       SELECT status, last_error FROM email_messages WHERE to_email = ${email}
@@ -163,7 +182,7 @@ describe('sending', () => {
     await queueOne(email);
 
     setEmailProvider(null); // falls back to the unconfigured provider
-    await drainOutbox();
+    await drainUntilProcessed(admin, email, 2);
 
     const [row] = await admin<{ status: string }[]>`
       SELECT status FROM email_messages WHERE to_email = ${email}
@@ -178,7 +197,7 @@ describe('delivery', () => {
     const email = `delivered.${Date.now()}@example.test`;
     await queueOne(email);
     setEmailProvider(new RecordingProvider(acceptsEach()));
-    await drainOutbox();
+    await drainUntilProcessed(admin, email);
 
     const applied = await applyDeliveryEvent({
       providerMessageId: await providerIdFor(admin, email),
@@ -197,7 +216,7 @@ describe('delivery', () => {
     const email = `bounced.${Date.now()}@example.test`;
     await queueOne(email);
     setEmailProvider(new RecordingProvider(acceptsEach()));
-    await drainOutbox();
+    await drainUntilProcessed(admin, email);
 
     await applyDeliveryEvent({
       providerMessageId: await providerIdFor(admin, email),

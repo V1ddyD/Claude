@@ -9,6 +9,8 @@ export interface TemplateContext {
   brandName: string;
   customerName?: string | null;
   payload: Record<string, unknown>;
+  /** Where the single-use link points. Absent in tests and previews. */
+  baseUrl?: string;
 }
 
 export interface RenderedTemplate {
@@ -89,6 +91,11 @@ export function renderTemplate(
   const { heading, intro, rows, closing } = template(ctx);
   const greeting = ctx.customerName ? `Hello ${ctx.customerName},` : 'Hello,';
 
+  // A reference number the customer cannot look up is just a string. The link
+  // is single-use and expiring, so it is safe to put in an email.
+  const accessToken = field(ctx.payload, 'accessToken');
+  const link = accessToken && ctx.baseUrl ? `${ctx.baseUrl}/r/${accessToken}` : null;
+
   const text = [
     greeting,
     '',
@@ -96,6 +103,7 @@ export function renderTemplate(
     intro,
     '',
     ...rows.map(([label, value]) => `${label}: ${value}`),
+    ...(link ? ['', `View your request: ${link}`] : []),
     ...(closing ? ['', closing] : []),
     '',
     ctx.brandName,
@@ -119,6 +127,7 @@ export function renderTemplate(
       )
       .join('')}
   </table>
+  ${link ? `<p style="margin:24px 0 0"><a href="${escapeHtml(link)}" style="color:#131519">View your request</a></p>` : ''}
   ${closing ? `<p style="color:#6b7280;font-size:13px;margin:24px 0 0">${escapeHtml(closing)}</p>` : ''}
 </div>`.trim();
 

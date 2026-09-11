@@ -18,6 +18,8 @@ export interface PromptContext {
   responseSlaHours: number;
   /** Structured facts already established, so the customer is not asked twice. */
   knownFacts: string[];
+  /** A compact record of turns older than the replay window. */
+  earlier?: string | null;
   nowLocal: string;
 }
 
@@ -78,6 +80,7 @@ have sent an email, reserved a car, or secured financing.
 ## The range
 ${ctx.catalogueDigest}
 
+${ctx.earlier ? `## Earlier in this conversation\n${ctx.earlier}\n` : ''}
 ${ctx.knownFacts.length > 0 ? `## What this customer has already told you\n${ctx.knownFacts.map((f) => `- ${f}`).join('\n')}\n\nDo not ask for any of this again.` : ''}`;
 }
 

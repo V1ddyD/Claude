@@ -68,4 +68,39 @@ export interface EvalResult {
   toolsUsed: string[];
   replies: string[];
   priority?: string;
+  usage?: TokenUsage;
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  requests: number;
+}
+
+/**
+ * Bounds on a live run.
+ *
+ * A live evaluation spends real money on someone else's account, so it stops
+ * on its own rather than relying on the corpus staying small.
+ */
+export interface EvalBudget {
+  maxRequests: number;
+  maxTokens: number;
+  maxCostUsd: number;
+}
+
+export const DEFAULT_EVAL_BUDGET: EvalBudget = {
+  maxRequests: 60,
+  maxTokens: 400_000,
+  maxCostUsd: 2.0,
+};
+
+/** Claude Opus 5, per million tokens. */
+export const PRICING = { inputPerMTok: 5.0, outputPerMTok: 25.0 } as const;
+
+export function estimateCostUsd(usage: TokenUsage): number {
+  return (
+    (usage.inputTokens / 1_000_000) * PRICING.inputPerMTok +
+    (usage.outputTokens / 1_000_000) * PRICING.outputPerMTok
+  );
 }

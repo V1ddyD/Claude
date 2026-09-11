@@ -55,6 +55,20 @@ export async function prepareDatabase(): Promise<void> {
       }
       await seedInventory(sql, SINCLAIR_TENANT_ID);
     }
+
+    // Release bookings left by earlier runs.
+    //
+    // The dealership has a finite number of demonstrators and salespeople, so
+    // appointments accumulated across runs eventually fill the diary and every
+    // booking test starts failing for a reason that has nothing to do with the
+    // code. Starting each run from a known booking state is the integration
+    // equivalent of a clean fixture — the catalogue and the leads stay.
+    await sql`UPDATE appointment_resources SET status = 'released' WHERE status = 'active'`;
+    await sql`
+      UPDATE appointments SET status = 'cancelled', cancelled_at = now(),
+        cancelled_reason = 'released by the test harness'
+      WHERE status IN ('scheduled', 'confirmed')
+    `;
   } finally {
     await sql.end({ timeout: 5 });
   }

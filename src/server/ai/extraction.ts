@@ -75,6 +75,7 @@ export async function extractAndScore(params: {
     await applySignals(db, lead.id, parsed.data, { source: 'ai' });
     const scored = await recomputePriority(db, lead.id);
     await writeSummary(db, lead.id, parsed.data);
+    await writeRollingSummary(db, params.conversationId, parsed.data);
 
     return {
       leadId: lead.id,
@@ -162,6 +163,54 @@ async function writeSummary(db: TenantDb, leadId: string, signals: LeadSignals):
  * foreign key is what stops an orphaned conversation existing for a browser
  * session nothing else knows about.
  */
+/**
+ * A compact record of what the conversation established.
+ *
+ * The assistant only replays the last few turns verbatim; without this, a long
+ * conversation silently forgets what was said earlier — which is exactly the
+ * failure a customer notices and cannot explain.
+ *
+ * Built from the structured signals rather than by asking a model to summarise,
+ * so it cannot introduce a detail the customer never gave.
+ */
+async function writeRollingSummary(
+  db: TenantDb,
+  conversationId: string,
+  signals: LeadSignals,
+): Promise<void> {
+  const parts: string[] = [];
+
+  if (signals.modelSlug?.value) {
+    parts.push(
+      `Looking at the ${[
+        String(signals.modelSlug.value).toUpperCase(),
+        signals.trimCode?.value,
+        signals.powertrainCode?.value,
+      ]
+        .filter(Boolean)
+        .join(' ')}`,
+    );
+  }
+  if (signals.exteriorColourCode?.value) parts.push(`colour ${signals.exteriorColourCode.value}`);
+  if (signals.budgetCents?.value) {
+    parts.push(`budget about ${Math.round(signals.budgetCents.value / 100).toLocaleString()}`);
+  }
+  if (signals.purchaseTimeframe?.value && signals.purchaseTimeframe.value !== 'unknown') {
+    parts.push(`buying ${String(signals.purchaseTimeframe.value).replace(/_/g, ' ')}`);
+  }
+  if (signals.tradeInInterest?.value) parts.push('has a trade-in');
+  if (signals.financeInterest?.value) parts.push('interested in financing');
+
+  if (parts.length === 0) return;
+
+  await db
+    .update(conversations)
+    .set({ rollingSummary: `Earlier in this conversation: ${parts.join(', ')}.` })
+    .where(
+      and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, conversationId)),
+    );
+}
+
 export async function ensureConversation(
   tenantId: string,
   params: { conversationId?: string; visitorId?: string | null },

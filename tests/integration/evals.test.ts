@@ -24,7 +24,7 @@ afterAll(async () => {
 
 describe('the assistant corpus', () => {
   it('passes every scripted case', async () => {
-    const results = await runCorpus(SINCLAIR_TENANT_ID, EVAL_CASES);
+    const { results } = await runCorpus(SINCLAIR_TENANT_ID, EVAL_CASES);
     expect(results.length).toBeGreaterThan(5);
 
     const failed = results.filter((r) => !r.passed);
@@ -49,7 +49,7 @@ describe('the assistant corpus', () => {
 
   it('keeps live-only cases out of the scripted run', async () => {
     // A live case scripted into passing would be worse than no case at all.
-    const results = await runCorpus(SINCLAIR_TENANT_ID, EVAL_CASES);
+    const { results } = await runCorpus(SINCLAIR_TENANT_ID, EVAL_CASES);
     const liveOnly = EVAL_CASES.filter((c) => c.mode === 'live').map((c) => c.name);
 
     expect(liveOnly.length).toBeGreaterThan(0);

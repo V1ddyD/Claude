@@ -17,6 +17,8 @@ export const conversations = pgTable(
     rollingSummary: text('rolling_summary'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Set when retention removed the message bodies. The shape remains. */
+    redactedAt: timestamp('redacted_at', { withTimezone: true }),
   },
   (t) => [index('conversations_recent_idx').on(t.tenantId, t.lastMessageAt)],
 );

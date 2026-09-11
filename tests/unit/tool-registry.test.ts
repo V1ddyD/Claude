@@ -96,6 +96,7 @@ describe('the real tool set', () => {
     // updates this list, not something that slips in with a feature.
     const writes = TOOLS.filter((t) => t.scope === 'write').map((t) => t.name).sort();
     expect(writes).toEqual([
+      'cancelTestDrive',
       'createCallbackRequest',
       'createFinancingRequest',
       'createSupportTicket',

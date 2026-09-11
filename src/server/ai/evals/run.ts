@@ -6,7 +6,10 @@ import { respondToMessage } from '@/server/ai/conversation';
 import { ensureConversation } from '@/server/ai/extraction';
 import { applySignals, recomputePriority, findLeadForConversation } from '@/server/services/leads';
 import { modelClient, type ModelClient, type ModelRequest, type ModelTurn } from '@/server/ai/client';
-import type { EvalCase, EvalResult } from './types';
+import {
+  DEFAULT_EVAL_BUDGET, estimateCostUsd,
+  type EvalBudget, type EvalCase, type EvalResult, type TokenUsage,
+} from './types';
 
 /**
  * The evaluation runner.
@@ -15,6 +18,52 @@ import type { EvalCase, EvalResult } from './types';
  * projections — so what it measures is the system as shipped, not a mock of it.
  * Only the model is substituted, and only in scripted mode.
  */
+
+/**
+ * Wraps the live client to meter spend and stop when the budget is reached.
+ *
+ * The cap is enforced here rather than trusted to the corpus: a case that
+ * loops, or a model that keeps calling tools, must not be able to run up a
+ * bill on the operator's account.
+ */
+class MeteredClient implements ModelClient {
+  readonly usage: TokenUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
+
+  constructor(
+    private readonly inner: ModelClient,
+    private readonly budget: EvalBudget,
+  ) {}
+
+  private assertWithinBudget(): void {
+    const spent = this.usage.inputTokens + this.usage.outputTokens;
+    if (this.usage.requests >= this.budget.maxRequests) {
+      throw new Error(`Evaluation budget reached: ${this.budget.maxRequests} requests`);
+    }
+    if (spent >= this.budget.maxTokens) {
+      throw new Error(`Evaluation budget reached: ${this.budget.maxTokens} tokens`);
+    }
+    if (estimateCostUsd(this.usage) >= this.budget.maxCostUsd) {
+      throw new Error(`Evaluation budget reached: $${this.budget.maxCostUsd}`);
+    }
+  }
+
+  private record(turn: ModelTurn): ModelTurn {
+    this.usage.inputTokens += turn.usage.inputTokens;
+    this.usage.outputTokens += turn.usage.outputTokens;
+    this.usage.requests += 1;
+    return turn;
+  }
+
+  async converse(request: ModelRequest): Promise<ModelTurn> {
+    this.assertWithinBudget();
+    return this.record(await this.inner.converse(request));
+  }
+
+  async stream(request: ModelRequest, onDelta: (text: string) => void): Promise<ModelTurn> {
+    this.assertWithinBudget();
+    return this.record(await this.inner.stream(request, onDelta));
+  }
+}
 
 /** Replays a case's scripted turns, one model turn at a time. */
 class CaseModel implements ModelClient {
@@ -44,7 +93,7 @@ class CaseModel implements ModelClient {
 export async function runCase(
   tenantId: string,
   testCase: EvalCase,
-  options: { live?: boolean } = {},
+  options: { live?: boolean; meter?: MeteredClient } = {},
 ): Promise<EvalResult> {
   const live = options.live ?? false;
   const failures: string[] = [];
@@ -65,7 +114,7 @@ export async function runCase(
     { text: turn.reply ?? '', tools: [] },
   ]);
 
-  const client = live ? modelClient() : new CaseModel(script);
+  const client = live ? (options.meter ?? modelClient()) : new CaseModel(script);
   if (!client) {
     return {
       name: testCase.name,
@@ -78,16 +127,25 @@ export async function runCase(
   }
 
   for (const turn of testCase.turns) {
-    const reply = await respondToMessage({
-      tenantId,
-      conversationId: session.conversationId,
-      visitorId: session.visitorId,
-      userMessage: turn.user,
-      requestId: `eval:${testCase.name}`,
-      client,
-    });
-    replies.push(reply.text);
-    toolsUsed.push(...reply.toolsUsed);
+    try {
+      const reply = await respondToMessage({
+        tenantId,
+        conversationId: session.conversationId,
+        visitorId: session.visitorId,
+        userMessage: turn.user,
+        requestId: `eval:${testCase.name}`,
+        client,
+      });
+      replies.push(reply.text);
+      toolsUsed.push(...reply.toolsUsed);
+    } catch (error) {
+      // A model or budget failure is a RESULT, not a crash: the report should
+      // say what happened rather than the run dying half way through.
+      failures.push(
+        `turn failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      break;
+    }
   }
 
   // Scoring is exercised by feeding the case's signals through the real
@@ -167,21 +225,52 @@ export async function runCase(
   };
 }
 
+export interface CorpusReport {
+  results: EvalResult[];
+  usage: TokenUsage;
+  estimatedCostUsd: number;
+  stoppedEarly: boolean;
+}
+
 export async function runCorpus(
   tenantId: string,
   cases: EvalCase[],
-  options: { live?: boolean } = {},
-): Promise<EvalResult[]> {
+  options: { live?: boolean; budget?: EvalBudget } = {},
+): Promise<CorpusReport> {
   const live = options.live ?? false;
+  const budget = options.budget ?? DEFAULT_EVAL_BUDGET;
+
   const applicable = cases.filter(
     (c) => c.mode === 'both' || c.mode === (live ? 'live' : 'scripted'),
   );
 
+  const inner = live ? modelClient() : null;
+  const meter = live && inner ? new MeteredClient(inner, budget) : undefined;
+
   const results: EvalResult[] = [];
+  let stoppedEarly = false;
+
   for (const testCase of applicable) {
-    results.push(await runCase(tenantId, testCase, options));
+    const before = meter ? { ...meter.usage } : undefined;
+    const result = await runCase(tenantId, testCase, { live, meter });
+
+    if (meter && before) {
+      result.usage = {
+        inputTokens: meter.usage.inputTokens - before.inputTokens,
+        outputTokens: meter.usage.outputTokens - before.outputTokens,
+        requests: meter.usage.requests - before.requests,
+      };
+    }
+    results.push(result);
+
+    if (result.failures.some((f) => f.includes('budget reached'))) {
+      stoppedEarly = true;
+      break;
+    }
   }
-  return results;
+
+  const usage = meter?.usage ?? { inputTokens: 0, outputTokens: 0, requests: 0 };
+  return { results, usage, estimatedCostUsd: estimateCostUsd(usage), stoppedEarly };
 }
 
 export { EVAL_CASES } from './cases';

@@ -6,7 +6,9 @@ import { ensureConversation } from '@/server/ai/extraction';
 import { respondToMessage } from '@/server/ai/conversation';
 import { withTenant } from '@/server/db/tenant-db';
 import { enqueue } from '@/server/jobs';
+import { createHash } from 'node:crypto';
 import { toPublicError, isAppError, AppError } from '@/server/errors';
+import { checkRateLimit } from '@/server/services/limits';
 import { isProduction } from '@/server/config/env';
 
 /**
@@ -28,9 +30,14 @@ const bodySchema = z.object({
   stream: z.boolean().optional(),
 });
 
-/** Per-visitor limit. A public endpoint calling a frontier model is an open cost surface. */
-const RATE_LIMIT = { windowMs: 60_000, max: 12 };
-const recentRequests = new Map<string, number[]>();
+/**
+ * Per-visitor limit, held in Postgres.
+ *
+ * It used to be an in-process Map, which meant every serverless instance had
+ * its own copy and the limit was effectively unenforced — on a public endpoint
+ * that calls a paid model, which is the one place it matters.
+ */
+const CHAT_LIMIT = { bucket: 'chat', max: 12, windowSeconds: 60 };
 
 /**
  * Stream the reply as server-sent events.
@@ -96,12 +103,6 @@ function streamReply(params: {
   });
 }
 
-function rateLimited(key: string, now: number): boolean {
-  const window = (recentRequests.get(key) ?? []).filter((t) => now - t < RATE_LIMIT.windowMs);
-  window.push(now);
-  recentRequests.set(key, window);
-  return window.length > RATE_LIMIT.max;
-}
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get('x-request-id') ?? crypto.randomUUID();
@@ -117,9 +118,26 @@ export async function POST(request: NextRequest) {
     const cookieStore = await cookies();
     const existingVisitor = cookieStore.get(VISITOR_COOKIE)?.value;
 
-    const rateKey = existingVisitor ?? request.headers.get('x-forwarded-for') ?? 'anonymous';
-    if (rateLimited(`${tenant.id}:${rateKey}`, Date.now())) {
-      throw new AppError('RATE_LIMITED', 'You are sending messages very quickly. Please pause a moment.');
+    // The subject is opaque: a visitor id, or a hashed forwarded-for. Never an
+    // email or a name — a rate-limit table is not a place for personal data.
+    const subject =
+      existingVisitor ??
+      createHash('sha256')
+        .update(request.headers.get('x-forwarded-for') ?? 'anonymous')
+        .digest('hex')
+        .slice(0, 32);
+
+    const limit = await checkRateLimit({ ...CHAT_LIMIT, subject: `${tenant.id}:${subject}` });
+    if (!limit.allowed) {
+      return NextResponse.json(
+        toPublicError(
+          new AppError(
+            'RATE_LIMITED',
+            'You are sending messages very quickly. Please pause a moment.',
+          ),
+        ),
+        { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } },
+      );
     }
 
     // Creates the visitor if the cookie is missing, unknown, or belongs to

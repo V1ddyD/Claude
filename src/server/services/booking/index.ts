@@ -378,6 +378,118 @@ export async function createTestDrive(
   };
 }
 
+export interface CancelRequest {
+  confirmationCode: string;
+  /** Must match the appointment's customer. The code alone is not enough. */
+  email: string;
+  reason?: string;
+}
+
+/**
+ * Cancel a test drive.
+ *
+ * Two factors, deliberately: the confirmation code the customer was given AND
+ * the email the booking was made with. The code alone would make a guessable
+ * six characters sufficient to cancel a stranger's appointment.
+ *
+ * Releasing the resource holds is the point — a cancelled appointment that
+ * still occupies the salesperson and the car takes a slot off the market for
+ * nobody.
+ */
+export async function cancelTestDrive(
+  db: TenantDb,
+  request: CancelRequest,
+): Promise<{ cancelled: true; wasAt: Date }> {
+  const rows = await db
+    .select({
+      id: appointments.id,
+      startsAt: appointments.startsAt,
+      status: appointments.status,
+      leadId: appointments.leadId,
+      customerId: appointments.customerId,
+      customerEmail: customers.email,
+    })
+    .from(appointments)
+    .innerJoin(customers, eq(customers.id, appointments.customerId))
+    .where(
+      and(
+        eq(appointments.tenantId, db.tenantId),
+        eq(appointments.confirmationCode, request.confirmationCode.toUpperCase()),
+      ),
+    )
+    .limit(1);
+
+  const appointment = rows[0];
+
+  // Wrong code, wrong email, or no such appointment: one answer for all three.
+  // Distinguishing them tells a guesser which guesses were close.
+  if (
+    !appointment ||
+    appointment.customerEmail?.toLowerCase() !== request.email.trim().toLowerCase()
+  ) {
+    throw notFound('That booking');
+  }
+
+  if (appointment.status === 'cancelled') {
+    // Idempotent: cancelling twice is not an error to a customer.
+    return { cancelled: true, wasAt: appointment.startsAt };
+  }
+  if (appointment.status === 'completed') {
+    throw new AppError('CONFLICT', 'That test drive has already taken place.');
+  }
+
+  await db
+    .update(appointments)
+    .set({
+      status: 'cancelled',
+      cancelledAt: new Date(),
+      cancelledReason: request.reason ?? 'Cancelled by the customer',
+    })
+    .where(and(eq(appointments.tenantId, db.tenantId), eq(appointments.id, appointment.id)));
+
+  // Released, not deleted: the exclusion constraint only applies to active
+  // holds, so the slot returns to the market while the record of it remains.
+  await db
+    .update(appointmentResources)
+    .set({ status: 'released' })
+    .where(
+      and(
+        eq(appointmentResources.tenantId, db.tenantId),
+        eq(appointmentResources.appointmentId, appointment.id),
+      ),
+    );
+
+  await db.insert(notifications).values({
+    tenantId: db.tenantId,
+    roleTarget: 'sales',
+    type: 'appointment_cancelled',
+    title: 'Test drive cancelled',
+    body: `${formatSlot({ startsAt: appointment.startsAt, endsAt: appointment.startsAt }, 'UTC', 'en-CA')}`,
+    linkPath: appointment.leadId ? `/portal/leads/${appointment.leadId}` : '/portal',
+  });
+
+  if (appointment.leadId) {
+    await recordLeadEvent(db, appointment.leadId, {
+      type: 'appointment_cancelled',
+      actorType: 'customer',
+      summary: `Customer cancelled their test drive. ${request.reason ?? ''}`.trim(),
+    });
+  }
+
+  await recordAudit(db, {
+    // The actor is the customer who owns the booking — identified by the
+    // confirmation code and email they supplied, not by a session.
+    actor: { type: 'customer', id: appointment.customerId },
+    action: 'appointment.cancelled',
+    entityType: 'appointment',
+    entityId: appointment.id,
+    before: { status: appointment.status },
+    after: { status: 'cancelled', reason: request.reason ?? null },
+  });
+
+  return { cancelled: true, wasAt: appointment.startsAt };
+}
+
 function clashes(
   bookings: { startsAt: Date; endsAt: Date }[] | undefined,
   startsAt: Date,

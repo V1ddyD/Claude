@@ -16,6 +16,8 @@ export type JobKind =
   | 'extract_and_score'
   | 'send_email'
   | 'evaluate_follow_ups'
+  | 'apply_retention'
+  | 'sweep_rate_limits'
   | 'expire_holds';
 
 export interface Job {

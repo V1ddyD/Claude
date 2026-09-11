@@ -8,6 +8,7 @@ import type { TenantDb } from '@/server/db/tenant-db';
 import { notFound } from '@/server/errors';
 import { recordAudit } from '@/server/services/audit';
 import { allocateTicketNumber } from './numbering';
+import { issueAccessToken } from './access';
 import { upsertLead, recordLeadEvent, recomputePriority } from '@/server/services/leads';
 
 /**
@@ -99,13 +100,21 @@ export async function createCustomerRequest(
   // and the customer still gets their ticket number on screen (spec §31).
   let emailQueued = false;
   if (request.emailTemplate && customer.email && customer.consent) {
+    // A single-use, expiring link to THIS ticket. Without it the customer
+    // receives a reference number they have no way to look up.
+    const access = await issueAccessToken(db, {
+      scope: 'ticket',
+      entityId: ticketId,
+      customerId: request.customerId,
+    });
+
     await db.insert(emailMessages).values({
       tenantId: db.tenantId,
       templateKey: request.emailTemplate,
       toEmail: customer.email,
       toName: customer.fullName,
       subject: `${tenant.brandName} — ${request.subject} (${ticketNumber})`,
-      payload: { ticketNumber, ...(request.emailPayload ?? {}) },
+      payload: { ticketNumber, accessToken: access.token, ...(request.emailPayload ?? {}) },
       dedupeKey: `ticket:${ticketId}`,
     });
     emailQueued = true;

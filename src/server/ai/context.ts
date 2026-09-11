@@ -1,6 +1,6 @@
 import 'server-only';
 import { and, eq, desc, isNull } from 'drizzle-orm';
-import { messages, leads, leadSignals } from '@/server/db/schema';
+import { messages, leads, leadSignals, conversations } from '@/server/db/schema';
 import type { TenantDb } from '@/server/db/tenant-db';
 
 /**
@@ -24,6 +24,8 @@ import type { TenantDb } from '@/server/db/tenant-db';
 export interface PinnedFacts {
   facts: string[];
   subject: { modelSlug?: string; trimCode?: string; powertrainCode?: string };
+  /** A compact record of earlier turns, for conversations past the replay window. */
+  earlier: string | null;
 }
 
 /** Fields worth carrying forward. Everything else is noise in a prompt. */
@@ -50,6 +52,12 @@ export async function buildPinnedFacts(
   const subject = await findCurrentSubject(db, conversationId);
   const facts: string[] = [];
   const seen = new Set<string>();
+
+  const [conversation] = await db
+    .select({ rollingSummary: conversations.rollingSummary })
+    .from(conversations)
+    .where(and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, conversationId)))
+    .limit(1);
 
   const leadRows = await db
     .select({ id: leads.id })
@@ -86,7 +94,7 @@ export async function buildPinnedFacts(
     facts.unshift(`Currently looking at the ${subject.modelSlug.toUpperCase()}`);
   }
 
-  return { facts, subject };
+  return { facts, subject, earlier: conversation?.rollingSummary ?? null };
 }
 
 /**

@@ -58,8 +58,16 @@ export interface ModelClient {
 class AnthropicModelClient implements ModelClient {
   private readonly client: Anthropic;
 
-  constructor(apiKey: string) {
-    this.client = new Anthropic({ apiKey, maxRetries: 2, timeout: 60_000 });
+  constructor(apiKey?: string) {
+    // Passing no apiKey lets the SDK resolve credentials itself:
+    // ANTHROPIC_API_KEY, then ANTHROPIC_AUTH_TOKEN, then an `ant auth login`
+    // profile on disk. An operator who has signed in with the CLI should not
+    // also have to paste a key into .env.local.
+    this.client = new Anthropic({
+      ...(apiKey ? { apiKey } : {}),
+      maxRetries: 2,
+      timeout: 60_000,
+    });
   }
 
   async converse(request: ModelRequest): Promise<ModelTurn> {
@@ -124,14 +132,19 @@ class AnthropicModelClient implements ModelClient {
 let cached: ModelClient | undefined;
 
 /**
- * Returns null when no key is configured. Callers degrade rather than throw:
- * the catalogue stays browsable and enquiries still reach the dealership
- * through a form (spec §33 — every external dependency can fail).
+ * Returns null when no credential is available. Callers degrade rather than
+ * throw: the catalogue stays browsable and enquiries still reach the
+ * dealership through a form (spec §33 — every external dependency can fail).
  */
 export function modelClient(): ModelClient | null {
   if (!features.ai) return null;
-  cached ??= new AnthropicModelClient(env.ANTHROPIC_API_KEY!);
+  cached ??= new AnthropicModelClient(env.ANTHROPIC_API_KEY);
   return cached;
+}
+
+/** True when SOME credential is present — a key, a token, or a CLI profile. */
+export function hasCredential(): boolean {
+  return features.ai;
 }
 
 /** Test seam. Also used to force degraded mode in development. */

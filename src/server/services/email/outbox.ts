@@ -1,6 +1,8 @@
 import 'server-only';
 import { and, eq, sql } from 'drizzle-orm';
-import { emailMessages, emailEvents, tenantSettings, tenants } from '@/server/db/schema';
+import {
+  emailMessages, emailEvents, tenantSettings, tenants, tenantDomains,
+} from '@/server/db/schema';
 import { withTenant } from '@/server/db/tenant-db';
 import { listActiveTenantIds } from '@/server/db/control-plane';
 import { emailProvider } from './provider';
@@ -121,10 +123,21 @@ async function sendOne(message: {
       return false;
     }
 
+    const [domain] = await db
+      .select({ hostname: tenantDomains.hostname })
+      .from(tenantDomains)
+      .where(
+        and(eq(tenantDomains.tenantId, db.tenantId), eq(tenantDomains.isPrimary, true)),
+      )
+      .limit(1);
+
     const rendered = renderTemplate(message.templateKey, message.subject, {
       brandName: tenant?.brandName ?? 'The dealership',
       customerName: message.toName,
       payload: message.payload,
+      // From the tenant's own primary domain: one dealership's email must
+      // never carry a link to another's site.
+      ...(domain ? { baseUrl: `https://${domain.hostname}` } : {}),
     });
 
     const result = await emailProvider().send({

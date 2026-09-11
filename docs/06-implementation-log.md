@@ -473,8 +473,63 @@ gap, and it is now the *only* structural one.
 
 ---
 
+## Gap closure — the answer to "what's missing?" ✅
+
+An audit against the specification and the running code, then the fixes that did not
+need anything from outside this environment.
+
+### Fixed
+
+| Gap | What it was | What it is now |
+|---|---|---|
+| Rate limiting | An in-process `Map`. Every serverless instance had its own, so a public endpoint calling a paid model was effectively unlimited | A Postgres counter, incremented in one statement so two concurrent requests cannot both read zero. Returns `Retry-After` |
+| Conversation memory | `rolling_summary` existed and nothing wrote it; past ~12 turns a conversation silently forgot | Written by the extraction pass from the structured signals — so it cannot invent a detail — and read back into the prompt |
+| Retention | Nothing. Conversations kept names, phones, budgets and trade-in details forever | A retention job redacts message bodies past the tenant's window, keeps the lead, appointment, ticket and audit trail, and audits the redaction itself. Plus an erasure path for a customer request |
+| AI budget | `monthlyTokenBudget` was seeded and never read | Spend is recorded per tenant per month; over budget degrades the assistant to the contact form, so a customer sees a service problem and never a billing one |
+| Cancelling a test drive | Documented as a tool, never built. A customer who could not make it had to telephone, and the car stayed blocked | `cancelTestDrive`, which **releases the holds** so the slot returns to the market. Two factors: the confirmation code AND the email — a six-character code alone would let anyone cancel a stranger's booking |
+| Customer ticket lookup | A reference number with no way to look it up | A single-use, expiring, ticket-scoped link in the confirmation email. Still no lookup by email — that would be an enumeration endpoint. Only the token's SHA-256 is stored |
+| Service tickets | The assistant could file one and nobody could open it | A ticket queue, filtered by whether the viewer holds the sales or service permission |
+| Appointments | No diary | An upcoming-appointments view grouped by day in the dealership's own timezone |
+
+### Two things the tests caught during the work
+
+1. **`rate_limit_counters` carried a `tenant_id` with no policy behind it.** The isolation
+   suite requires every table with that column to have one, and correctly refused. The
+   column was never written — the tenant is part of the opaque subject key, because the
+   chat endpoint has to refuse a request *before* a tenant context exists. Migration 0005
+   drops it rather than adding a policy that would imply a scoping that does not exist.
+
+2. **The suite was only repeatable once.** Running it a second and third time surfaced
+   three separate faults: an email backlog starving new messages out of the drain batch
+   (correct oldest-first behaviour, wrong test), and booking tests that accumulated
+   appointments until the finite demonstrator fleet saturated. The harness now starts
+   each run from a known booking state, and the suite is stable across four consecutive
+   runs without a reset.
+
+### Live evaluation — attempted, cannot run here
+
+Asked to connect the API and run the live corpus, I checked properly rather than
+assuming: no `ANTHROPIC_API_KEY`, no `ANTHROPIC_AUTH_TOKEN`, no `ant` CLI, no credential
+profile on disk. `ANTHROPIC_BASE_URL` is set but is simply `https://api.anthropic.com`,
+which returns `401 — x-api-key header is required`.
+
+So the live corpus has not run, and no live result is reported. What was built instead,
+so that it is one command when a key exists:
+
+- The client now uses the SDK's own credential resolution, so a key, a token or an
+  `ant auth login` profile all work.
+- The runner meters every request and **stops itself** at 60 requests, 400k tokens or
+  **$2.00**, whichever comes first — a live run spends real money on someone else's
+  account and should not depend on the corpus staying small.
+- It reports tokens and estimated cost per case and in total.
+- `scripts/measure-prompt.ts` measures the real payload: **911-token system prompt,
+  3,655-token tool definitions, ~4,566 tokens of fixed prefix per request.** A full live
+  corpus run is roughly **$0.34 with prompt caching, $0.97 without** — the prefix is
+  marked cacheable, which is most of the difference.
+
+---
+
 ## M6 — next
 
-Live evaluation once a key exists, then production readiness: rate-limit hardening,
-retention and erasure jobs, accessibility audit, and onboarding a second dealership by
-configuration alone — the real test of the multi-tenant claim.
+Production readiness: accessibility, error and empty states, deployment, and onboarding a
+second dealership by configuration alone — the real test of the multi-tenant claim.

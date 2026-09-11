@@ -10,6 +10,7 @@ import { modelClient, type ModelClient } from '@/server/ai/client';
 import { buildSystemPrompt } from '@/server/ai/prompts/system';
 import { buildPinnedFacts } from '@/server/ai/context';
 import { formatMoney } from '@/server/services/pricing';
+import { hasAiBudget, recordAiUsage } from '@/server/services/limits';
 import { AppError } from '@/server/errors';
 
 /**
@@ -64,6 +65,7 @@ const TOOL_STATUS: Record<string, string> = {
   getDealershipHours: 'Checking our hours',
   getAvailableTestDriveSlots: 'Checking the diary',
   createTestDrive: 'Booking that in',
+  cancelTestDrive: 'Cancelling that for you',
   createCallbackRequest: 'Passing that to the team',
   createSupportTicket: 'Passing that to the team',
   createTradeInRequest: 'Recording your vehicle',
@@ -99,8 +101,15 @@ export async function respondToMessage(params: {
   stream?: ConversationStream;
 }): Promise<ConversationReply> {
   const tenant = await getTenantById(params.tenantId);
-  const client = params.client !== undefined ? params.client : modelClient();
+  let client = params.client !== undefined ? params.client : modelClient();
   const now = params.now ?? new Date();
+
+  // A dealership that has spent its monthly budget degrades to the contact
+  // form. The customer sees a service problem, never a billing one, and the
+  // enquiry still reaches the dealership.
+  if (client && params.client === undefined && !(await hasAiBudget(params.tenantId))) {
+    client = null;
+  }
 
   if (!client) {
     // Degraded mode. The customer gets an honest answer and a route to a
@@ -138,6 +147,7 @@ export async function respondToMessage(params: {
       catalogueDigest: await buildCatalogueDigest(db, tenant),
       responseSlaHours: 1,
       knownFacts: pinned.facts,
+      earlier: pinned.earlier,
       nowLocal: new Intl.DateTimeFormat(tenant.locale, {
         timeZone: tenant.timezone, dateStyle: 'full',
       }).format(now),
@@ -180,6 +190,8 @@ export async function respondToMessage(params: {
       // Each iteration's text is a separate utterance: a preamble before a
       // tool call, then the answer. Concatenated, because the customer has
       // already seen both stream past — replacing would contradict the screen.
+      await recordAiUsage(db, turn.usage);
+
       if (turn.text) finalText = finalText ? `${finalText}\n\n${turn.text}` : turn.text;
 
       if (turn.toolUses.length === 0) break;

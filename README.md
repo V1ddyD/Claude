@@ -55,8 +55,13 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 - Follow-up rules that create tasks for staff, never messages to customers
 - Lead assignment, a declared status pipeline, and internal staff notes
 
-231 tests pass against a real PostgreSQL 16, including **the spec §44 demonstration
-scenario end to end**. Next: **M6 — production readiness.**
+- Durable rate limiting, per-tenant AI budget, conversation memory across long chats,
+  data retention and erasure
+- Test drive cancellation that releases the car, and a single-use link so a customer can
+  look up their own request
+
+236 tests pass against a real PostgreSQL 16, stable across repeated runs, including
+**the spec §44 demonstration scenario end to end**. Next: **M6 — production readiness.**
 
 > **One known gap.** No `ANTHROPIC_API_KEY` has been configured, so the model client is
 > written but has never run — everything around it is tested with a scripted model, and

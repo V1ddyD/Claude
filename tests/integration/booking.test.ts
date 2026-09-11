@@ -272,6 +272,27 @@ describe('two customers racing for one slot', () => {
       WHERE a.status = 'active' AND b.status = 'active'
     `;
     expect(overlaps[0]?.count).toBe(0);
+
+    // Release what this test booked. The dealership has a finite number of
+    // demonstrators, so a contention test that keeps its bookings fills the
+    // diary and starves every later run — which is a test that only works once.
+    const booked = outcomes
+      .filter((o): o is PromiseFulfilledResult<Awaited<ReturnType<typeof createTestDrive>>> =>
+        o.status === 'fulfilled',
+      )
+      .map((o) => o.value.appointmentId);
+
+    if (booked.length > 0) {
+      await admin`
+        UPDATE appointment_resources SET status = 'released'
+        WHERE appointment_id = ANY(${admin.array(booked)}::uuid[])
+      `;
+      await admin`
+        UPDATE appointments SET status = 'cancelled', cancelled_at = now(),
+          cancelled_reason = 'test cleanup'
+        WHERE id = ANY(${admin.array(booked)}::uuid[])
+      `;
+    }
   }, 60_000);
 
   it('leaves no orphaned ticket when a booking loses the race', async () => {

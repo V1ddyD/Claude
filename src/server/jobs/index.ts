@@ -5,6 +5,8 @@ import { extractAndScore } from '@/server/ai/extraction';
 import { releaseExpiredReservations } from '@/server/services/inventory';
 import { drainOutbox } from '@/server/services/email/outbox';
 import { evaluateFollowUps } from '@/server/services/follow-ups';
+import { applyRetention } from '@/server/services/retention';
+import { sweepRateLimits } from '@/server/services/limits';
 import { withTenant } from '@/server/db/tenant-db';
 
 /** Job handlers. Each must be idempotent: a retry re-runs the whole handler. */
@@ -27,6 +29,15 @@ const HANDLERS: Record<string, (job: Job) => Promise<void>> = {
   evaluate_follow_ups: async (job) => {
     if (!job.tenantId) return;
     await evaluateFollowUps(job.tenantId);
+  },
+
+  apply_retention: async (job) => {
+    if (!job.tenantId) return;
+    await applyRetention(job.tenantId);
+  },
+
+  sweep_rate_limits: async () => {
+    await sweepRateLimits();
   },
 
   expire_holds: async (job) => {

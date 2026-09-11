@@ -9,6 +9,7 @@ import {
 } from './read/advice-tools';
 import { getAvailableTestDriveSlots_tool } from './read/booking-tools';
 import { createTestDriveTool } from './write/create-test-drive';
+import { cancelTestDriveTool } from './write/cancel';
 import {
   createCallbackRequest, createSupportTicket, createTradeInRequest,
   createFinancingRequestTool, requestHumanHandoff,
@@ -52,6 +53,7 @@ export const TOOLS: AnyTool[] = [
   updateContactPreferences,
   saveBuild,
   createTestDriveTool,
+  cancelTestDriveTool,
   createCallbackRequest,
   createSupportTicket,
   createTradeInRequest,

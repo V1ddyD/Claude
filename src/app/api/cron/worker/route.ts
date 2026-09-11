@@ -41,6 +41,8 @@ async function scheduleRecurringWork(): Promise<void> {
       await enqueue(db, 'evaluate_follow_ups', {});
       await enqueue(db, 'expire_holds', {});
       await enqueue(db, 'send_email', {});
+      await enqueue(db, 'apply_retention', {});
+      await enqueue(db, 'sweep_rate_limits', {});
     });
   }
 }
