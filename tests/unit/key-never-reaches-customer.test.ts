@@ -69,16 +69,19 @@ describe('the key is server-side only', () => {
 describe('the chat request', () => {
   const assistant = readFileSync('src/components/site/assistant.tsx', 'utf8');
 
-  it('carries only the customer\'s message and their conversation', () => {
+  it('carries only the customer\'s message, their conversation, and a transport flag', () => {
     const body = /body: JSON\.stringify\(\{([^}]*)\}\)/.exec(assistant)?.[1] ?? '';
     const fields = body
       .split(',')
       .map((part) => part.split(':')[0]!.trim())
       .filter(Boolean);
 
-    // No key, no model name, no credentials, no tenant — the server knows all
-    // of those from the request itself.
-    expect(fields.sort()).toEqual(['conversationId', 'message']);
+    // Pinned exactly, so a new field is a deliberate act. `stream` asks for
+    // server-sent events; it carries no identity and no credential.
+    //
+    // What must never appear: a key, a model name, a tenant, a customer id —
+    // the server knows every one of those from the request itself.
+    expect(fields.sort()).toEqual(['conversationId', 'message', 'stream']);
   });
 
   it('offers the customer no way to supply a key', () => {

@@ -14,6 +14,8 @@ export interface ChatMessage {
   receipt?: Receipt;
   /** A failed send stays visible so the customer can retry it. */
   failed?: boolean;
+  /** Still arriving. The caret shows only while this is true. */
+  streaming?: boolean;
 }
 
 export interface ChatResponse {

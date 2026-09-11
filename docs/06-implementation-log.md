@@ -391,7 +391,90 @@ turn (after the tool loop settles) is the fix and is the first thing I would do 
 
 ---
 
-## M5 — next
+## M5 — Streaming, evaluation and operations ✅
 
-Streaming, the AI evaluation corpus once a key exists, follow-up automation, and portal
-depth: assignment, status transitions, staff notes and the ticket queue.
+### Built
+
+| Area | Where |
+|---|---|
+| Streaming replies (SSE) | `src/server/ai/client.ts`, `conversation.ts`, `api/chat/route.ts` |
+| Customer-safe progress while tools run | `TOOL_STATUS` in `conversation.ts` |
+| Evaluation corpus and runner | `src/server/ai/evals/` |
+| `npm run eval` / `npm run eval:live` | `scripts/eval.ts` |
+| Follow-up rules and evaluation | `src/server/services/follow-ups/` |
+| Staff actions: status, assignment, notes | `src/server/services/leads/actions.ts` |
+| Portal forms and follow-up queue | `src/app/(portal)/portal/(dashboard)/` |
+| Recurring work on a schedule | `api/cron/worker/route.ts`, `vercel.json` |
+
+**Streaming.** `stream.on('text')` feeds deltas out while `finalMessage()` still gives
+the loop the complete message it needs to dispatch tools — so streaming is an addition
+to the loop, not a different shape of it. The preamble before a tool call streams too,
+because that is the part that makes waiting feel like conversation. While a tool runs
+the customer sees *"Checking what we have in stock"*, never a tool name; a test asserts
+every one of the 22 tools has a phrase.
+
+**Evaluation.** Two modes, and the distinction is the point. **Scripted** supplies the
+tool calls and measures the *system* — grounding, refusals, leakage, scoring — and runs
+in CI with no key. **Live** lets the model choose and measures the *model* — whether it
+reaches for the right tool, declines to invent, hands off instead of negotiating. A case
+declares which mode it belongs to, because a live case scripted into passing is worse
+than no case at all. Nine scripted cases pass today; three live cases are waiting for a
+key.
+
+**Follow-ups create tasks for people, never messages to customers.** Spec §14 is explicit
+about not chasing customers, and automated outbound on a dealership's behalf is a
+liability that belongs to a human. Evaluation is idempotent on
+`(tenant, lead, rule, due_at)`, and a batch produces one staff notification rather than
+one per task.
+
+**Priority is computed; status is owned by a person.** Staff move a lead through a
+declared pipeline — `won` is terminal, `new → won` is refused with the allowed
+transitions attached so the UI can offer them — and every move records who made it.
+
+### One real bug, found by running the suite twice
+
+**Concurrent bookings could deadlock, and the customer saw a database error.**
+
+A test drive holds two resources: a salesperson and a car. They were inserted in
+whatever order they were found, so one booking could hold the salesperson while another
+held the car, each waiting for the other. Postgres resolves that by killing a
+transaction with `40P01` — which is not the exclusion violation the code was catching,
+so it escaped untyped and reached the customer as `DrizzleQueryError: insert into
+"appointment_resources"…`.
+
+Two fixes, both kept: holds are now acquired in a deterministic order, so the deadlock
+cannot form; and `40P01` and `40001` are treated as what they mean to a customer —
+someone else got there first. `tests/integration/booking.test.ts` reproduces the original
+contention pattern.
+
+It took running the suite twice without resetting the database to surface it, which is
+worth remembering: a test suite that is only ever run against a clean database will not
+find the bugs that only appear under load.
+
+Three test-isolation faults were fixed alongside it — a worker test whose fixed marker
+accumulated rows across runs, and two assertions that read "the first matching row" from
+a shared table. All three made diagnosis harder than the bug itself.
+
+### What is still NOT verified
+
+**No live model call has been made.** Still no `ANTHROPIC_API_KEY`. `npm run eval:live`
+exists and is ready; the three live cases are written. This remains the single largest
+gap, and it is now the *only* structural one.
+
+### Deliberately not built
+
+- **Analytics.** Spec §42 is explicit that analytics come after operations work, and
+  they now do — but pipeline charts are worth less than the follow-up queue, which
+  shipped instead.
+- **Ticket and appointment queues in the portal.** Both entities are complete and
+  tested; the staff-facing lists are presentation and can follow.
+- **Tenant settings UI.** Scoring weights and follow-up rules are seeded as rows and
+  read from the database, so they are tunable today — through SQL rather than a form.
+
+---
+
+## M6 — next
+
+Live evaluation once a key exists, then production readiness: rate-limit hardening,
+retention and erasure jobs, accessibility audit, and onboarding a second dealership by
+configuration alone — the real test of the multi-tenant claim.

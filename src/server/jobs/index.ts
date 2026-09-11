@@ -4,6 +4,7 @@ import { listActiveTenantIds } from '@/server/db/control-plane';
 import { extractAndScore } from '@/server/ai/extraction';
 import { releaseExpiredReservations } from '@/server/services/inventory';
 import { drainOutbox } from '@/server/services/email/outbox';
+import { evaluateFollowUps } from '@/server/services/follow-ups';
 import { withTenant } from '@/server/db/tenant-db';
 
 /** Job handlers. Each must be idempotent: a retry re-runs the whole handler. */
@@ -21,6 +22,11 @@ const HANDLERS: Record<string, (job: Job) => Promise<void>> = {
     // drains whatever is due for the tenant rather than one named message.
     if (!job.tenantId) return;
     await drainOutbox(job.tenantId);
+  },
+
+  evaluate_follow_ups: async (job) => {
+    if (!job.tenantId) return;
+    await evaluateFollowUps(job.tenantId);
   },
 
   expire_holds: async (job) => {

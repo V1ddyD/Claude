@@ -44,6 +44,15 @@ export interface ModelRequest {
 
 export interface ModelClient {
   converse(request: ModelRequest): Promise<ModelTurn>;
+  /**
+   * Same as converse, but text is handed over as it arrives.
+   *
+   * The tool loop still needs the COMPLETE message to dispatch a tool, so this
+   * returns the same ModelTurn — streaming is an addition to the loop, not a
+   * different shape of it. Deltas from a turn that ends in a tool call are the
+   * model's preamble ("let me check that"), which is worth showing.
+   */
+  stream(request: ModelRequest, onDelta: (text: string) => void): Promise<ModelTurn>;
 }
 
 class AnthropicModelClient implements ModelClient {
@@ -54,7 +63,20 @@ class AnthropicModelClient implements ModelClient {
   }
 
   async converse(request: ModelRequest): Promise<ModelTurn> {
-    const response = await this.client.messages.create({
+    const response = await this.client.messages.create(this.params(request));
+    return this.toTurn(response);
+  }
+
+  async stream(request: ModelRequest, onDelta: (text: string) => void): Promise<ModelTurn> {
+    const stream = this.client.messages.stream(this.params(request));
+    // The `text` event yields the delta string directly; filtering raw
+    // content_block_delta events by hand would be the same thing, badly.
+    stream.on('text', onDelta);
+    return this.toTurn(await stream.finalMessage());
+  }
+
+  private params(request: ModelRequest): Anthropic.MessageCreateParamsNonStreaming {
+    return {
       model: request.model ?? CONVERSATION_MODEL,
       max_tokens: request.maxTokens ?? 4096,
       // The system prompt and tool list are the stable prefix. Marking the
@@ -66,8 +88,10 @@ class AnthropicModelClient implements ModelClient {
       ...(request.tools ? { tools: request.tools } : {}),
       output_config: { effort: request.effort ?? 'low' },
       messages: request.messages,
-    });
+    };
+  }
 
+  private toTurn(response: Anthropic.Message): ModelTurn {
     // A safety decline is a normal outcome, not an exception: check before
     // reading content, which is empty in that case.
     if (response.stop_reason === 'refusal') {

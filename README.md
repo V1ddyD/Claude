@@ -23,7 +23,7 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**M4 — The assistant, complete.** Built and verified so far:
+**M5 — Streaming, evaluation and operations, complete.** Built and verified so far:
 
 - Schema applied and migrated (47 tables, 44 tenant-scoped)
 - Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
@@ -49,12 +49,19 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 - Conversation memory, so the customer is never asked the same thing twice
 - A transactional email outbox that reports `delivered` only when the provider says so
 
-200 tests pass against a real PostgreSQL 16, including **the spec §44 demonstration
-scenario end to end**. Next: **M5 — streaming, evaluation, automation.**
+- **Streamed replies**, with a plain-language note while a tool runs
+- An **evaluation corpus** — `npm run eval` measures the system, `npm run eval:live`
+  measures the model
+- Follow-up rules that create tasks for staff, never messages to customers
+- Lead assignment, a declared status pipeline, and internal staff notes
 
-> **Two known gaps.** No `ANTHROPIC_API_KEY` has been configured, so the model client is
-> written but has never run — everything around it is tested with a scripted model. And
-> replies are not yet streamed. Both are detailed in `docs/06-implementation-log.md` -> M4.
+231 tests pass against a real PostgreSQL 16, including **the spec §44 demonstration
+scenario end to end**. Next: **M6 — production readiness.**
+
+> **One known gap.** No `ANTHROPIC_API_KEY` has been configured, so the model client is
+> written but has never run — everything around it is tested with a scripted model, and
+> `npm run eval:live` is ready for the day a key exists.
+> See `docs/06-implementation-log.md` -> M5.
 
 ## Quick start
 

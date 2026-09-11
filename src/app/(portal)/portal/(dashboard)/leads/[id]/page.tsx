@@ -1,6 +1,10 @@
 import { notFound } from 'next/navigation';
+import { eq, and } from 'drizzle-orm';
 import { withStaff } from '@/server/auth/require-staff';
 import { getLeadDetail } from '@/server/db/repositories/leads';
+import { allowedNextStatuses } from '@/server/services/leads/actions';
+import { staffUsers } from '@/server/db/schema';
+import { changeStatusAction, assignLeadAction, addNoteAction } from './actions';
 import { PriorityBadge } from '@/components/portal/priority-badge';
 import { formatMoney } from '@/server/services/pricing';
 
@@ -15,17 +19,42 @@ export const metadata = { title: 'Lead' };
  * source, the AI summary, the appointment, the ticket, and the complete
  * conversation.
  */
-export default async function LeadPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function LeadPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ error?: string }>;
+}) {
   const { id } = await params;
+  const { error } = await searchParams;
 
-  const detail = await withStaff('lead.read.assigned', (db, staff) =>
-    getLeadDetail(db, staff, id),
+  const { detail, staff, colleagues } = await withStaff(
+    'lead.read.assigned',
+    async (db, currentStaff) => ({
+      detail: await getLeadDetail(db, currentStaff, id),
+      staff: {
+        role: currentStaff.role,
+        canAssign: currentStaff.can('lead.assign'),
+        canWriteStatus: currentStaff.can('lead.status.write'),
+        canNote: currentStaff.can('lead.note.write'),
+      },
+      // Only offered when the viewer may actually assign — the list of who
+      // works here is not something every role needs to see.
+      colleagues: currentStaff.can('lead.assign')
+        ? await db
+            .select({ id: staffUsers.id, fullName: staffUsers.fullName, role: staffUsers.role })
+            .from(staffUsers)
+            .where(and(eq(staffUsers.tenantId, db.tenantId), eq(staffUsers.status, 'active')))
+        : [],
+    }),
   );
   // A lead outside this staff member's visibility is "not found", not
   // "forbidden": distinguishing them confirms the record exists.
   if (!detail) notFound();
 
   const { lead, customer, signals, timeline, transcript, appointments, tickets, notes } = detail;
+  const nextStatuses = allowedNextStatuses(lead.status);
 
   return (
     <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
@@ -40,6 +69,15 @@ export default async function LeadPage({ params }: { params: Promise<{ id: strin
 
         {lead.scoreRationale && (
           <p className="mt-2 text-sm text-ink-500">{lead.scoreRationale}</p>
+        )}
+
+        {error && (
+          <p
+            role="alert"
+            className="mt-4 rounded border border-accent-600/30 bg-accent-600/5 px-4 py-3 text-sm text-accent-600"
+          >
+            {error}
+          </p>
         )}
 
         {lead.aiSummary && (
@@ -83,6 +121,62 @@ export default async function LeadPage({ params }: { params: Promise<{ id: strin
       </div>
 
       <aside className="space-y-6">
+        <Panel title="Working this lead">
+          <div className="space-y-4 pt-1">
+            <p className="text-sm text-ink-900">
+              Status: <span className="font-medium">{lead.status.replace(/_/g, ' ')}</span>
+            </p>
+
+            {staff.canWriteStatus && nextStatuses.length > 0 && (
+              <form action={changeStatusAction} className="flex flex-wrap gap-2">
+                <input type="hidden" name="leadId" value={lead.id} />
+                {nextStatuses.map((status) => (
+                  <button
+                    key={status}
+                    type="submit"
+                    name="status"
+                    value={status}
+                    className="rounded border border-ink-100 bg-white px-2.5 py-1 text-xs text-ink-900 transition-colors hover:border-ink-300"
+                  >
+                    {status.replace(/_/g, ' ')}
+                  </button>
+                ))}
+              </form>
+            )}
+            {nextStatuses.length === 0 && (
+              <p className="text-xs text-ink-500">This lead is closed.</p>
+            )}
+
+            {staff.canAssign && (
+              <form action={assignLeadAction} className="flex gap-2">
+                <input type="hidden" name="leadId" value={lead.id} />
+                <label htmlFor="assign" className="sr-only">
+                  Assign to
+                </label>
+                <select
+                  id="assign"
+                  name="staffId"
+                  defaultValue={lead.assignedStaffId ?? ''}
+                  className="flex-1 rounded border border-ink-100 bg-white px-2 py-1.5 text-sm text-ink-900"
+                >
+                  <option value="">Unassigned</option>
+                  {colleagues.map((colleague) => (
+                    <option key={colleague.id} value={colleague.id}>
+                      {colleague.fullName} · {colleague.role}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="submit"
+                  className="rounded bg-ink-900 px-3 py-1.5 text-xs text-white hover:bg-ink-800"
+                >
+                  Assign
+                </button>
+              </form>
+            )}
+          </div>
+        </Panel>
+
         <Panel title="Contact">
           <Row label="Email" value={customer.email} />
           <Row label="Phone" value={customer.phone} />
@@ -155,6 +249,28 @@ export default async function LeadPage({ params }: { params: Promise<{ id: strin
         </Panel>
 
         <Panel title="Staff notes">
+          {staff.canNote && (
+            <form action={addNoteAction} className="space-y-2 pb-3 pt-1">
+              <input type="hidden" name="leadId" value={lead.id} />
+              <label htmlFor="note" className="sr-only">
+                Add an internal note
+              </label>
+              <textarea
+                id="note"
+                name="body"
+                rows={2}
+                maxLength={2000}
+                placeholder="Internal note — never shown to the customer"
+                className="w-full resize-none rounded border border-ink-100 bg-white p-2 text-sm text-ink-900 placeholder:text-ink-300"
+              />
+              <button
+                type="submit"
+                className="rounded bg-ink-900 px-3 py-1.5 text-xs text-white hover:bg-ink-800"
+              >
+                Add note
+              </button>
+            </form>
+          )}
           {notes.length === 0 && (
             <p className="text-sm text-ink-500">
               No notes. These are internal and never shown to the customer.

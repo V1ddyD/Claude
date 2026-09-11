@@ -42,6 +42,44 @@ export interface Receipt {
   confirmationEmail?: string;
 }
 
+/**
+ * What the customer is told is happening while a tool runs.
+ *
+ * Mapped deliberately: internal tool names are not shown, and the phrasing says
+ * what the dealership is doing rather than what the software is doing.
+ */
+const TOOL_STATUS: Record<string, string> = {
+  searchVehicles: 'Looking through the range',
+  getVehicle: 'Pulling up the details',
+  getVehiclePowertrains: 'Checking the engine options',
+  getVehicleTrims: 'Checking the trim levels',
+  getVehicleColours: 'Checking the colours',
+  getVehicleOptions: 'Checking the options',
+  getVehicleFeatures: 'Checking the specification',
+  calculateVehiclePrice: 'Working out the price',
+  compareVehicles: 'Comparing them',
+  checkInventory: 'Checking what we have in stock',
+  calculateFinanceEstimate: 'Working out an estimate',
+  getDealershipInformation: 'Checking our details',
+  getDealershipHours: 'Checking our hours',
+  getAvailableTestDriveSlots: 'Checking the diary',
+  createTestDrive: 'Booking that in',
+  createCallbackRequest: 'Passing that to the team',
+  createSupportTicket: 'Passing that to the team',
+  createTradeInRequest: 'Recording your vehicle',
+  createFinancingRequest: 'Passing that to the team',
+  requestHumanHandoff: 'Getting a specialist',
+  saveBuild: 'Saving your specification',
+  updateContactPreferences: 'Noting your details',
+};
+
+export interface ConversationStream {
+  /** Text as it arrives, including any preamble before a tool call. */
+  onDelta?: (text: string) => void;
+  /** A customer-safe phrase while a tool runs. Never a tool name. */
+  onStatus?: (status: string) => void;
+}
+
 export interface ConversationReply {
   text: string;
   conversationId: string;
@@ -58,6 +96,7 @@ export async function respondToMessage(params: {
   requestId: string;
   now?: Date;
   client?: ModelClient | null;
+  stream?: ConversationStream;
 }): Promise<ConversationReply> {
   const tenant = await getTenantById(params.tenantId);
   const client = params.client !== undefined ? params.client : modelClient();
@@ -66,10 +105,15 @@ export async function respondToMessage(params: {
   if (!client) {
     // Degraded mode. The customer gets an honest answer and a route to a
     // person, never a fabricated one (spec §34).
-    return {
-      text:
+    const message =
         `I can't reach our assistant service just now. You can browse the ${tenant.brandName} ` +
-        `range here, and if you leave your details the team will follow up directly.`,
+        `range here, and if you leave your details the team will follow up directly.`;
+
+    // Streamed too, so the interface has one path rather than two.
+    params.stream?.onDelta?.(message);
+
+    return {
+      text: message,
       conversationId: params.conversationId,
       toolsUsed: [],
       degraded: true,
@@ -122,14 +166,21 @@ export async function respondToMessage(params: {
     let receipt: Receipt | undefined;
 
     for (let iteration = 0; iteration < MAX_TOOL_CALLS_PER_TURN; iteration++) {
-      const turn = await client.converse({
+      const request = {
         system,
         messages: conversation,
         tools: registry.schemas() as Anthropic.Tool[],
-        effort: 'low',
-      });
+        effort: 'low' as const,
+      };
 
-      if (turn.text) finalText = turn.text;
+      const turn = params.stream?.onDelta
+        ? await client.stream(request, params.stream.onDelta)
+        : await client.converse(request);
+
+      // Each iteration's text is a separate utterance: a preamble before a
+      // tool call, then the answer. Concatenated, because the customer has
+      // already seen both stream past — replacing would contradict the screen.
+      if (turn.text) finalText = finalText ? `${finalText}\n\n${turn.text}` : turn.text;
 
       if (turn.toolUses.length === 0) break;
 
@@ -147,6 +198,8 @@ export async function respondToMessage(params: {
 
       for (const use of turn.toolUses) {
         const definition = registry.get(use.name)?.definition;
+        const status = TOOL_STATUS[use.name];
+        if (status) params.stream?.onStatus?.(status);
 
         // One write per turn: no single customer message should be able to
         // create a lead, a ticket and an appointment at once.

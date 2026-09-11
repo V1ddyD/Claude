@@ -82,7 +82,7 @@ selling mid-conversation, an email provider failure, and a retry that must not d
 
 ---
 
-## M5 — Streaming, evaluation and automation — next
+## M5 — Streaming, evaluation and operations ✅
 
 Follow-up rules and staff tasks. Staff notifications, deduplicated. Hold expiry.
 Operational analytics: leads over time, priority mix, conversion, response time, popular
@@ -93,7 +93,7 @@ recommended action — and no automated message to the customer.
 
 ---
 
-## M6 — Production readiness *(spec phases 14–15)*
+## M6 — Production readiness *(spec phases 14–15)* — next
 
 Security review against the §13 model. Rate limits and token budgets. Load and
 concurrency testing on booking. Accessibility audit. Error, loading and empty states

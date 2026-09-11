@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, boolean, timestamp, smallint, bigint, numeric, jsonb,
+  pgTable, uuid, text, boolean, timestamp, smallint, integer, bigint, numeric, jsonb,
   unique, index,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -98,6 +98,49 @@ export const staffNotes = pgTable('staff_notes', {
   body: text('body').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const followUpRules = pgTable(
+  'follow_up_rules',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    key: text('key').notNull(),
+    description: text('description').notNull(),
+    trigger: jsonb('trigger').notNull(),
+    delayMinutes: integer('delay_minutes').notNull(),
+    businessHoursOnly: boolean('business_hours_only').notNull().default(true),
+    recommendedAction: text('recommended_action').notNull(),
+    isActive: boolean('is_active').notNull().default(true),
+  },
+  (t) => [unique().on(t.tenantId, t.key)],
+);
+
+/**
+ * A task for a person. Never a message to a customer.
+ *
+ * The unique key is what makes evaluation idempotent: a worker that runs twice
+ * must not nag a salesperson twice.
+ */
+export const followUpTasks = pgTable(
+  'follow_up_tasks',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: uuid('tenant_id').notNull(),
+    leadId: uuid('lead_id'),
+    appointmentId: uuid('appointment_id'),
+    ruleKey: text('rule_key').notNull(),
+    reason: text('reason').notNull(),
+    recommendedAction: text('recommended_action').notNull(),
+    dueAt: timestamp('due_at', { withTimezone: true }).notNull(),
+    assignedStaffId: uuid('assigned_staff_id'),
+    status: text('status').notNull().default('pending')
+      .$type<'pending' | 'done' | 'dismissed'>(),
+    completedBy: uuid('completed_by'),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique().on(t.tenantId, t.leadId, t.ruleKey, t.dueAt)],
+);
 
 /** Tenant-configurable weights. The engine reads these, not constants. */
 export const leadScoringRules = pgTable(

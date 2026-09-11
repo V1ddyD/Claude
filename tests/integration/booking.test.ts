@@ -163,6 +163,9 @@ describe('two customers racing for one slot', () => {
     const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
       getAvailableTestDriveSlots(db, TENANT, { from, to }),
     );
+    // Asserted, because an empty list would make every racer fail for a
+    // reason that has nothing to do with the race.
+    expect(slots.length, 'no bookable slots in the race window').toBeGreaterThan(0);
     const target = slots[0]!.startsAt;
 
     // Enough racers to exhaust every demonstrator and salesperson for the slot.
@@ -194,8 +197,12 @@ describe('two customers racing for one slot', () => {
     // Losers get a typed, customer-safe refusal — never a database error.
     for (const outcome of lost) {
       const reason = (outcome as PromiseRejectedResult).reason;
-      expect.soft(isAppError(reason) && reason.code).toBe('SLOT_TAKEN');
-      expect.soft((reason as Error).message).not.toMatch(/constraint|postgres|23P01/i);
+      const describe = isAppError(reason)
+        ? `${reason.code}: ${reason.message}`
+        : `UNTYPED ${(reason as Error)?.constructor?.name}: ${(reason as Error)?.message}`;
+
+      expect.soft(isAppError(reason) && reason.code, describe).toBe('SLOT_TAKEN');
+      expect.soft((reason as Error).message, describe).not.toMatch(/constraint|postgres|23P01/i);
     }
 
     // The real assertion: no resource is double-booked, by anyone, ever.
@@ -209,6 +216,63 @@ describe('two customers racing for one slot', () => {
     `;
     expect(overlaps[0]?.count).toBe(0);
   });
+
+  it('never surfaces a database error, even under heavy contention', async () => {
+    // This is the case that found the lock-ordering bug. Racers spread across
+    // two adjacent slots contend for OVERLAPPING but not identical resource
+    // sets — one wants salesperson A and car B, another wants car B and
+    // salesperson A. Acquired in different orders, that is a deadlock, and
+    // Postgres resolves it by killing a transaction with an error that has
+    // nothing to do with availability.
+    const { from, to } = windowFrom(9);
+    const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
+      getAvailableTestDriveSlots(db, TENANT, { from, to }),
+    );
+    expect(slots.length).toBeGreaterThan(1);
+
+    const racers = await Promise.all(
+      Array.from({ length: 14 }, async (_, i) => ({
+        customerId: await newCustomer(`Contender ${i}`),
+        conversationId: await newConversation(),
+        startsAt: slots[i % 2]!.startsAt,
+      })),
+    );
+
+    const outcomes = await Promise.allSettled(
+      racers.map((racer) =>
+        withTenant(SINCLAIR_TENANT_ID, (db) =>
+          createTestDrive(db, TENANT, {
+            conversationId: racer.conversationId,
+            customerId: racer.customerId,
+            startsAt: racer.startsAt,
+          }),
+        ),
+      ),
+    );
+
+    for (const outcome of outcomes) {
+      if (outcome.status === 'fulfilled') continue;
+      const reason = outcome.reason;
+      const describe = isAppError(reason)
+        ? `${reason.code}: ${reason.message}`
+        : `UNTYPED ${(reason as Error)?.constructor?.name}: ${(reason as Error)?.message}`;
+
+      // Every loser gets something a customer can be shown.
+      expect.soft(isAppError(reason), describe).toBe(true);
+      expect.soft((reason as Error).message, describe).not.toMatch(
+        /deadlock|constraint|postgres|relation|insert into/i,
+      );
+    }
+
+    const overlaps = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM appointment_resources a
+        JOIN appointment_resources b
+          ON a.resource_id = b.resource_id AND a.id <> b.id AND a.time_range && b.time_range
+      WHERE a.status = 'active' AND b.status = 'active'
+    `;
+    expect(overlaps[0]?.count).toBe(0);
+  }, 60_000);
 
   it('leaves no orphaned ticket when a booking loses the race', async () => {
     // Every part of a booking commits together or not at all, so a failed

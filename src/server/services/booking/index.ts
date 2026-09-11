@@ -6,7 +6,10 @@ import {
   vehicleModels, customers,
 } from '@/server/db/schema';
 import type { TenantDb } from '@/server/db/tenant-db';
-import { AppError, pgErrorCode, PG_EXCLUSION_VIOLATION, notFound } from '@/server/errors';
+import {
+  AppError, pgErrorCode, notFound,
+  PG_EXCLUSION_VIOLATION, PG_DEADLOCK_DETECTED, PG_SERIALIZATION_FAILURE,
+} from '@/server/errors';
 import { recordAudit } from '@/server/services/audit';
 import { allocateTicketNumber } from '@/server/services/tickets/numbering';
 import { upsertLead, recordLeadEvent, recomputePriority, applySignals } from '@/server/services/leads';
@@ -253,18 +256,35 @@ export async function createTestDrive(
   // The exclusion constraint fires HERE if anyone booked these resources in the
   // gap between the check above and this insert. That race is real, it is not
   // preventable by checking harder, and Postgres is what actually settles it.
+  //
+  // The rows are sorted by resource id so that EVERY booking acquires its locks
+  // in the same order. Without that, one booking can hold the salesperson while
+  // another holds the car, each waiting for the other — a deadlock, which
+  // Postgres resolves by killing one transaction with an error that has nothing
+  // to do with availability. Consistent ordering makes that impossible.
+  const holds = [freeStaff, freeVehicle]
+    .sort()
+    .map((resourceId) => ({
+      tenantId: db.tenantId,
+      appointmentId,
+      resourceId,
+      startsAt: request.startsAt,
+      endsAt,
+    }));
+
   try {
-    await db.insert(appointmentResources).values(
-      [freeStaff, freeVehicle].map((resourceId) => ({
-        tenantId: db.tenantId,
-        appointmentId,
-        resourceId,
-        startsAt: request.startsAt,
-        endsAt,
-      })),
-    );
+    await db.insert(appointmentResources).values(holds);
   } catch (err) {
-    if (pgErrorCode(err) === PG_EXCLUSION_VIOLATION) throw slotTaken();
+    const code = pgErrorCode(err);
+    // All three mean the same thing to a customer: someone else got there
+    // first. None of them should ever surface as a database error.
+    if (
+      code === PG_EXCLUSION_VIOLATION ||
+      code === PG_DEADLOCK_DETECTED ||
+      code === PG_SERIALIZATION_FAILURE
+    ) {
+      throw slotTaken();
+    }
     throw err;
   }
 

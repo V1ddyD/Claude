@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ConfirmationSlip } from './confirmation-slip';
-import type { ChatMessage, ChatResponse } from './assistant-types';
+import type { ChatMessage } from './assistant-types';
 
 /**
  * The Sinclair assistant.
@@ -28,6 +28,7 @@ export function Assistant({ brandName, greeting, suggestions = [] }: AssistantPr
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | undefined>();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -57,50 +58,116 @@ export function Assistant({ brandName, greeting, suggestions = [] }: AssistantPr
       if (!trimmed || pending) return;
 
       const outgoing: ChatMessage = { id: crypto.randomUUID(), role: 'user', text: trimmed };
+      const replyId = crypto.randomUUID();
+
       setMessages((current) => [...current, outgoing]);
       setInput('');
       setPending(true);
+      setStatus(null);
+
+      /** Append a delta to the in-flight reply, creating it on the first one. */
+      const appendDelta = (chunk: string) => {
+        setMessages((current) => {
+          const last = current.at(-1);
+          if (last?.id === replyId) {
+            return [...current.slice(0, -1), { ...last, text: last.text + chunk }];
+          }
+          return [
+            ...current,
+            { id: replyId, role: 'assistant', text: chunk, streaming: true },
+          ];
+        });
+      };
+
+      const settle = (patch: Partial<ChatMessage>) => {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === replyId ? { ...message, ...patch, streaming: false } : message,
+          ),
+        );
+      };
 
       try {
         const response = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: trimmed, conversationId }),
+          body: JSON.stringify({ message: trimmed, conversationId, stream: true }),
         });
 
-        if (!response.ok) {
+        if (!response.ok || !response.body) {
           const problem = (await response.json().catch(() => null)) as { message?: string } | null;
           throw new Error(problem?.message ?? 'Something went wrong.');
         }
 
-        const data = (await response.json()) as ChatResponse;
-        setConversationId(data.conversationId);
-        setMessages((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            text: data.message,
-            ...(data.receipt ? { receipt: data.receipt } : {}),
-          },
-        ]);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let failure: string | null = null;
+
+        // Server-sent events arrive in arbitrary chunks, so events are split
+        // on the blank-line delimiter rather than per read.
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() ?? '';
+
+          for (const frame of frames) {
+            const name = /^event: (.+)$/m.exec(frame)?.[1];
+            const raw = /^data: (.+)$/m.exec(frame)?.[1];
+            if (!name || !raw) continue;
+
+            const data = JSON.parse(raw) as Record<string, string>;
+
+            if (name === 'delta') {
+              setStatus(null);
+              appendDelta(data.text ?? '');
+            } else if (name === 'status') {
+              setStatus(data.status ?? null);
+            } else if (name === 'receipt') {
+              settle({ receipt: data as unknown as ChatMessage['receipt'] });
+            } else if (name === 'done') {
+              if (data.conversationId) setConversationId(data.conversationId);
+            } else if (name === 'error') {
+              failure = data.message ?? 'Something went wrong.';
+            }
+          }
+        }
+
+        if (failure) {
+          // An error can arrive after text has already streamed, so it is
+          // appended rather than replacing what the customer has read.
+          setMessages((current) => {
+            const existing = current.find((m) => m.id === replyId);
+            return existing
+              ? current.map((m) =>
+                  m.id === replyId
+                    ? { ...m, text: `${m.text}\n\n${failure}`, failed: true, streaming: false }
+                    : m,
+                )
+              : [...current, { id: replyId, role: 'assistant', text: failure!, failed: true }];
+          });
+        } else {
+          settle({});
+        }
       } catch (error) {
-        // The customer is told plainly, and their message stays on screen so
-        // they can send it again rather than retyping it.
-        setMessages((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            text:
-              error instanceof Error
-                ? error.message
-                : "I couldn't send that just now. Please try again.",
-            failed: true,
-          },
-        ]);
+        const message =
+          error instanceof Error
+            ? error.message
+            : "I couldn't send that just now. Please try again.";
+
+        setMessages((current) =>
+          current.some((m) => m.id === replyId)
+            ? current.map((m) =>
+                m.id === replyId ? { ...m, failed: true, streaming: false } : m,
+              )
+            : [...current, { id: replyId, role: 'assistant', text: message, failed: true }],
+        );
       } finally {
         setPending(false);
+        setStatus(null);
       }
     },
     [conversationId, pending],
@@ -162,7 +229,15 @@ export function Assistant({ brandName, greeting, suggestions = [] }: AssistantPr
                       }`
                 }
               >
-                <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{message.text}</p>
+                <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
+                  {message.text}
+                  {message.streaming && (
+                    <span
+                      aria-hidden
+                      className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-ink-300"
+                    />
+                  )}
+                </p>
               </div>
               {message.receipt && (
                 <ConfirmationSlip receipt={message.receipt} brandName={brandName} />
@@ -172,11 +247,19 @@ export function Assistant({ brandName, greeting, suggestions = [] }: AssistantPr
 
           {/* Announced to assistive technology without stealing focus. */}
           <div aria-live="polite" className="sr-only">
-            {pending ? 'Thinking' : messages.at(-1)?.role === 'assistant' ? messages.at(-1)!.text : ''}
+            {/* Announced once the reply has settled, rather than on every
+                delta, which would make a screen reader stutter through it. */}
+            {pending
+              ? (status ?? 'Thinking')
+              : messages.at(-1)?.role === 'assistant' && !messages.at(-1)?.streaming
+                ? messages.at(-1)!.text
+                : ''}
           </div>
 
-          {pending && (
-            <div className="w-fit rounded bg-white px-3.5 py-3">
+          {/* Shown only until the first delta lands: once text is arriving,
+              the text itself is the progress indicator. */}
+          {pending && !messages.at(-1)?.streaming && (
+            <div className="flex w-fit items-center gap-2.5 rounded bg-white px-3.5 py-3">
               <span className="flex gap-1" aria-hidden>
                 {[0, 150, 300].map((delay) => (
                   <span
@@ -186,6 +269,7 @@ export function Assistant({ brandName, greeting, suggestions = [] }: AssistantPr
                   />
                 ))}
               </span>
+              {status && <span className="text-[13px] text-ink-500">{status}</span>}
             </div>
           )}
         </div>

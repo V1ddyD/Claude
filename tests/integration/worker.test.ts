@@ -38,9 +38,8 @@ describe('the control plane', () => {
 
 describe('claiming work', () => {
   it('actually claims and completes a job', async () => {
-    await withTenant(SINCLAIR_TENANT_ID, (db) =>
-      enqueue(db, 'expire_holds', { probe: 'worker-test' }),
-    );
+    const probe = `worker-${Date.now()}`;
+    await withTenant(SINCLAIR_TENANT_ID, (db) => enqueue(db, 'expire_holds', { probe }));
 
     const report = await runWorker();
     expect(report.claimed).toBeGreaterThan(0);
@@ -48,28 +47,36 @@ describe('claiming work', () => {
 
     const [row] = await admin<{ status: string }[]>`
       SELECT status FROM job_queue
-      WHERE payload->>'probe' = 'worker-test' ORDER BY created_at DESC LIMIT 1
+      WHERE payload->>'probe' = ${probe} ORDER BY created_at DESC LIMIT 1
     `;
     expect(row?.status).toBe('done');
   });
 
   it('works across more than one tenant', async () => {
-    await withTenant(SINCLAIR_TENANT_ID, (db) => enqueue(db, 'expire_holds', { t: 'a' }));
-    await withTenant(NORTHWIND_TENANT_ID, (db) => enqueue(db, 'expire_holds', { t: 'b' }));
+    // Tagged per run: the database is shared and not reset between runs, so a
+    // fixed marker accumulates rows from previous runs and the assertion
+    // drifts. A run id keeps the test honest about what IT did.
+    const run = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    await withTenant(SINCLAIR_TENANT_ID, (db) => enqueue(db, 'expire_holds', { run, t: 'a' }));
+    await withTenant(NORTHWIND_TENANT_ID, (db) => enqueue(db, 'expire_holds', { run, t: 'b' }));
 
     await runWorker();
 
     const rows = await admin<{ tenant_id: string; status: string }[]>`
-      SELECT tenant_id, status FROM job_queue WHERE payload->>'t' IN ('a','b')
+      SELECT tenant_id, status FROM job_queue WHERE payload->>'run' = ${run}
     `;
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.status === 'done')).toBe(true);
+    // Both tenants, not one tenant twice.
+    expect(new Set(rows.map((r) => r.tenant_id)).size).toBe(2);
   });
 
   it('retries a failing job with backoff rather than losing it', async () => {
+    const probe = `unhandled-${Date.now()}`;
     await withTenant(SINCLAIR_TENANT_ID, (db) =>
       // No handler exists for this kind, so the job fails deterministically.
-      enqueue(db, 'no_such_kind' as 'expire_holds', { probe: 'unhandled' }),
+      enqueue(db, 'no_such_kind' as 'expire_holds', { probe }),
     );
 
     const report = await runWorker();
@@ -77,7 +84,7 @@ describe('claiming work', () => {
 
     const [row] = await admin<{ status: string; attempts: number; last_error: string; run_at: Date }[]>`
       SELECT status, attempts, last_error, run_at FROM job_queue
-      WHERE payload->>'probe' = 'unhandled' ORDER BY created_at DESC LIMIT 1
+      WHERE payload->>'probe' = ${probe} ORDER BY created_at DESC LIMIT 1
     `;
     expect(row?.status).toBe('pending');
     expect(row?.attempts).toBe(1);
@@ -86,20 +93,21 @@ describe('claiming work', () => {
   });
 
   it('gives up after the attempt limit instead of retrying forever', async () => {
+    const probe = `dead-${Date.now()}`;
     await withTenant(SINCLAIR_TENANT_ID, (db) =>
-      enqueue(db, 'no_such_kind' as 'expire_holds', { probe: 'dead' }),
+      enqueue(db, 'no_such_kind' as 'expire_holds', { probe }),
     );
     // Exhaust the attempts, making each retry immediately due.
     for (let i = 0; i < 6; i++) {
       await admin`
         UPDATE job_queue SET run_at = now()
-        WHERE payload->>'probe' = 'dead' AND status = 'pending'
+        WHERE payload->>'probe' = ${probe} AND status = 'pending'
       `;
       await runWorker();
     }
 
     const [row] = await admin<{ status: string; attempts: number }[]>`
-      SELECT status, attempts FROM job_queue WHERE payload->>'probe' = 'dead'
+      SELECT status, attempts FROM job_queue WHERE payload->>'probe' = ${probe}
     `;
     // Dead, not pending: a job that can never succeed must stop consuming the
     // queue, and must stay visible to an admin rather than vanishing.
@@ -108,14 +116,15 @@ describe('claiming work', () => {
   });
 
   it('does not claim a job scheduled for the future', async () => {
+    const probe = `later-${Date.now()}`;
     await withTenant(SINCLAIR_TENANT_ID, (db) =>
-      enqueue(db, 'expire_holds', { probe: 'later' }, { runAt: new Date(Date.now() + 3600_000) }),
+      enqueue(db, 'expire_holds', { probe }, { runAt: new Date(Date.now() + 3600_000) }),
     );
 
     await runWorker();
 
     const [row] = await admin<{ status: string }[]>`
-      SELECT status FROM job_queue WHERE payload->>'probe' = 'later'
+      SELECT status FROM job_queue WHERE payload->>'probe' = ${probe}
     `;
     expect(row?.status).toBe('pending');
   });

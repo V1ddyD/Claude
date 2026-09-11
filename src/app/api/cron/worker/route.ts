@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { runWorker } from '@/server/jobs';
+import { runWorker, enqueue } from '@/server/jobs';
+import { listActiveTenantIds } from '@/server/db/control-plane';
+import { withTenant } from '@/server/db/tenant-db';
 import { env } from '@/server/config/env';
 
 /**
@@ -22,8 +24,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // Recurring work is enqueued here rather than stored as scheduled rows: the
+  // cron call IS the schedule, and a job that is due every tick does not need a
+  // row waiting for it. Each handler is idempotent, so a double tick is safe.
+  await scheduleRecurringWork();
+
   const report = await runWorker();
   return NextResponse.json(report);
+}
+
+async function scheduleRecurringWork(): Promise<void> {
+  const tenantIds = await listActiveTenantIds();
+
+  for (const tenantId of tenantIds) {
+    await withTenant(tenantId, async (db) => {
+      await enqueue(db, 'evaluate_follow_ups', {});
+      await enqueue(db, 'expire_holds', {});
+      await enqueue(db, 'send_email', {});
+    });
+  }
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

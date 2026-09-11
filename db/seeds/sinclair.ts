@@ -1,4 +1,6 @@
 import type { Sql } from 'postgres';
+import { DEFAULT_SCORING_RULES } from '../../src/server/services/scoring/rules';
+import { DEFAULT_FOLLOW_UP_RULES } from '../../src/server/services/follow-ups/rules';
 
 /**
  * Sinclair — tenant #1 and the demonstration environment.
@@ -118,6 +120,31 @@ export async function seedSinclair(sql: Sql): Promise<void> {
     ) AS d(dept, dow, opens, closes)
     ON CONFLICT (tenant_id, department, day_of_week) DO NOTHING
   `;
+
+  // Scoring weights and follow-up rules are seeded as ROWS, not left to the
+  // code defaults, so a dealership can tune them in the portal without a
+  // deploy — which is the whole point of them being configurable (spec §56).
+  for (const rule of DEFAULT_SCORING_RULES) {
+    await sql`
+      INSERT INTO lead_scoring_rules (tenant_id, key, description, condition, weight, min_confidence)
+      VALUES (${SINCLAIR_TENANT_ID}, ${rule.key}, ${rule.description},
+              ${sql.json(rule.condition as never)}, ${rule.weight}, ${rule.minConfidence})
+      ON CONFLICT (tenant_id, key) DO UPDATE SET weight = EXCLUDED.weight
+    `;
+  }
+
+  for (const rule of DEFAULT_FOLLOW_UP_RULES) {
+    await sql`
+      INSERT INTO follow_up_rules (
+        tenant_id, key, description, trigger, delay_minutes, business_hours_only,
+        recommended_action
+      )
+      VALUES (${SINCLAIR_TENANT_ID}, ${rule.key}, ${rule.description},
+              ${sql.json({ kind: rule.key })}, ${rule.delayMinutes},
+              ${rule.businessHoursOnly}, ${rule.recommendedAction})
+      ON CONFLICT (tenant_id, key) DO UPDATE SET delay_minutes = EXCLUDED.delay_minutes
+    `;
+  }
 
   for (const staff of Object.values(SINCLAIR_STAFF)) {
     await sql`

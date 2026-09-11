@@ -225,12 +225,24 @@ describe('the demonstration scenario', () => {
   });
 
   it('queued the confirmation email rather than claiming delivery', async () => {
-    const [email] = await admin<{ status: string; delivered_at: Date | null }[]>`
+    const messages = await admin<{ status: string; delivered_at: Date | null }[]>`
       SELECT status, delivered_at FROM email_messages
       WHERE to_email = 'alex.morgan@example.test'
+      ORDER BY created_at DESC
     `;
-    expect(email?.status).toBe('queued');
-    expect(email?.delivered_at).toBeNull();
+
+    expect(messages.length).toBeGreaterThan(0);
+
+    // The invariant spec §21 actually protects: nothing is marked delivered
+    // without a provider webhook saying so. Asserted across every matching
+    // message rather than the first one found, because this database is shared
+    // and a message may legitimately have been accepted by a provider since.
+    for (const message of messages) {
+      expect.soft(message.delivered_at).toBeNull();
+      expect.soft(['queued', 'accepted']).toContain(message.status);
+    }
+    // The one this run just created has not been through a provider at all.
+    expect(messages[0]!.status).toBe('queued');
   });
 
   it('notified the sales team', async () => {

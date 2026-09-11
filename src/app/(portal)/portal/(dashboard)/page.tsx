@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { withStaff } from '@/server/auth/require-staff';
 import { countByPriority } from '@/server/db/repositories/leads';
+import { listDueFollowUps } from '@/server/services/follow-ups';
+import { completeFollowUpAction } from './leads/[id]/actions';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Dashboard' };
@@ -14,16 +16,27 @@ export const metadata = { title: 'Dashboard' };
  * staff nothing true.
  */
 const PENDING = [
-  { title: "Today's appointments", arrives: 'M4' },
-  { title: 'Open tickets', arrives: 'M4' },
-  { title: 'Follow-ups due', arrives: 'M5' },
+  { title: "Today's appointments", arrives: 'M6' },
+  { title: 'Open tickets', arrives: 'M6' },
+  { title: 'Conversion', arrives: 'M6' },
 ];
 
 export default async function DashboardPage() {
-  const { counts, staff } = await withStaff('lead.read.assigned', async (db, staff) => ({
-    counts: await countByPriority(db, staff),
-    staff,
-  }));
+  const { counts, followUps, staff } = await withStaff(
+    'lead.read.assigned',
+    async (db, currentStaff) => ({
+      counts: await countByPriority(db, currentStaff),
+      followUps: await listDueFollowUps(
+        db,
+        currentStaff.authUserId,
+        currentStaff.can('lead.read.all'),
+      ),
+      staff: {
+        fullName: currentStaff.fullName,
+        seesAll: currentStaff.can('lead.read.all'),
+      },
+    }),
+  );
 
   return (
     <>
@@ -32,7 +45,7 @@ export default async function DashboardPage() {
           Good afternoon, {staff.fullName.split(' ')[0]}
         </h1>
         <p className="text-sm text-ink-500">
-          {staff.can('lead.read.all') ? 'All dealership leads' : 'Your assigned leads'}
+          {staff.seesAll ? 'All dealership leads' : 'Your assigned leads'}
         </p>
       </div>
 
@@ -64,10 +77,70 @@ export default async function DashboardPage() {
         ))}
       </div>
 
-      <p className="mt-8 max-w-2xl text-sm leading-relaxed text-ink-500">
-        Lead figures are live. The remaining panels stay empty until the subsystems behind
-        them exist — a fabricated count would make this page look finished while telling
-        you nothing true.
+      <section className="mt-12">
+        <h2 className="text-[11px] uppercase tracking-[0.25em] text-ink-500">
+          Follow-ups due
+        </h2>
+
+        {followUps.length === 0 ? (
+          <p className="mt-4 text-sm text-ink-500">
+            Nothing outstanding. Tasks appear here when a high-priority lead goes
+            unanswered, a callback is waiting, or a test drive is tomorrow.
+          </p>
+        ) : (
+          <ul className="mt-4 divide-y divide-ink-100 overflow-hidden rounded border border-ink-100 bg-white">
+            {followUps.map((task) => (
+              <li key={task.id} className="flex flex-wrap items-center gap-4 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  {/* The action first: staff need to know what to DO, not
+                      which rule fired. */}
+                  <p className="text-sm text-ink-900">{task.recommendedAction}</p>
+                  <p className="text-xs text-ink-500">
+                    {task.reason} · due{' '}
+                    {new Intl.DateTimeFormat('en-CA', {
+                      dateStyle: 'medium',
+                      timeStyle: 'short',
+                    }).format(task.dueAt)}
+                  </p>
+                </div>
+                {task.leadId && (
+                  <Link
+                    href={`/portal/leads/${task.leadId}`}
+                    className="text-sm text-ink-900 underline-offset-2 hover:underline"
+                  >
+                    Open
+                  </Link>
+                )}
+                <form action={completeFollowUpAction} className="flex gap-2">
+                  <input type="hidden" name="taskId" value={task.id} />
+                  <input type="hidden" name="leadId" value={task.leadId ?? ''} />
+                  <button
+                    type="submit"
+                    name="outcome"
+                    value="done"
+                    className="rounded bg-ink-900 px-2.5 py-1 text-xs text-white hover:bg-ink-800"
+                  >
+                    Done
+                  </button>
+                  <button
+                    type="submit"
+                    name="outcome"
+                    value="dismissed"
+                    className="rounded border border-ink-100 px-2.5 py-1 text-xs text-ink-500 hover:border-ink-300"
+                  >
+                    Dismiss
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <p className="mt-10 max-w-2xl text-sm leading-relaxed text-ink-500">
+        Lead figures and follow-ups are live. The remaining panels stay empty until the
+        subsystems behind them exist — a fabricated count would make this page look
+        finished while telling you nothing true.
       </p>
     </>
   );

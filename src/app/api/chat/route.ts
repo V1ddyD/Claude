@@ -24,11 +24,77 @@ const VISITOR_COOKIE = 'sinclair_visitor';
 const bodySchema = z.object({
   message: z.string().min(1).max(2000),
   conversationId: z.string().uuid().optional(),
+  /** Server-sent events. The non-streaming path stays for simple clients. */
+  stream: z.boolean().optional(),
 });
 
 /** Per-visitor limit. A public endpoint calling a frontier model is an open cost surface. */
 const RATE_LIMIT = { windowMs: 60_000, max: 12 };
 const recentRequests = new Map<string, number[]>();
+
+/**
+ * Stream the reply as server-sent events.
+ *
+ * Events: `status` while a tool runs, `delta` for text as it arrives,
+ * `receipt` for a confirmation slip, `done` at the end, `error` if something
+ * fails mid-stream.
+ *
+ * Errors are delivered as an event rather than an HTTP status, because the
+ * headers are long gone by the time anything can go wrong. A customer must
+ * never be left watching a stream that simply stops.
+ */
+function streamReply(params: {
+  tenantId: string;
+  conversationId: string;
+  visitorId: string;
+  userMessage: string;
+  requestId: string;
+}): Response {
+  const encoder = new TextEncoder();
+
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+        );
+      };
+
+      try {
+        const reply = await respondToMessage({
+          ...params,
+          stream: {
+            onDelta: (text) => send('delta', { text }),
+            onStatus: (status) => send('status', { status }),
+          },
+        });
+
+        if (reply.receipt) send('receipt', reply.receipt);
+        send('done', {
+          conversationId: reply.conversationId,
+          degraded: reply.degraded,
+        });
+      } catch (error) {
+        if (!isAppError(error)) {
+          console.error(`[chat:stream] ${params.requestId}`, error);
+        }
+        send('error', toPublicError(error));
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // Stops nginx and similar buffering the stream into one lump.
+      'X-Accel-Buffering': 'no',
+    },
+  });
+}
 
 function rateLimited(key: string, now: number): boolean {
   const window = (recentRequests.get(key) ?? []).filter((t) => now - t < RATE_LIMIT.windowMs);
@@ -63,6 +129,38 @@ export async function POST(request: NextRequest) {
       visitorId: existingVisitor,
     });
 
+    const setVisitorCookie = (response: Response) => {
+      if (session.visitorId === existingVisitor) return response;
+      // A Set-Cookie on a streamed response: the header goes out with the
+      // headers, before the first byte of the body, so it is not affected by
+      // the stream that follows.
+      response.headers.append(
+        'Set-Cookie',
+        `${VISITOR_COOKIE}=${session.visitorId}; HttpOnly; SameSite=Lax; Path=/; ` +
+          `Max-Age=${60 * 60 * 24 * 180}${isProduction ? '; Secure' : ''}`,
+      );
+      return response;
+    };
+
+    // Extraction and scoring run off the customer's critical path. Enqueued
+    // BEFORE the reply is produced so a client that disconnects mid-stream
+    // still leaves the lead to be scored.
+    await withTenant(tenant.id, (db) =>
+      enqueue(db, 'extract_and_score', { conversationId: session.conversationId }),
+    );
+
+    if (parsed.data.stream) {
+      return setVisitorCookie(
+        streamReply({
+          tenantId: tenant.id,
+          conversationId: session.conversationId,
+          visitorId: session.visitorId,
+          userMessage: parsed.data.message,
+          requestId,
+        }),
+      );
+    }
+
     const reply = await respondToMessage({
       tenantId: tenant.id,
       conversationId: session.conversationId,
@@ -71,31 +169,14 @@ export async function POST(request: NextRequest) {
       requestId,
     });
 
-    // Extraction and scoring run off the customer's critical path. They also
-    // run in a context that has never held a customer-facing reply, which is
-    // what keeps internal state structurally unable to leak into one.
-    await withTenant(tenant.id, (db) =>
-      enqueue(db, 'extract_and_score', { conversationId: session.conversationId }),
+    return setVisitorCookie(
+      NextResponse.json({
+        message: reply.text,
+        conversationId: session.conversationId,
+        degraded: reply.degraded,
+        ...(reply.receipt ? { receipt: reply.receipt } : {}),
+      }),
     );
-
-    const response = NextResponse.json({
-      message: reply.text,
-      conversationId: session.conversationId,
-      degraded: reply.degraded,
-      ...(reply.receipt ? { receipt: reply.receipt } : {}),
-    });
-
-    if (session.visitorId !== existingVisitor) {
-      response.cookies.set(VISITOR_COOKIE, session.visitorId, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: isProduction,
-        path: '/',
-        maxAge: 60 * 60 * 24 * 180,
-      });
-    }
-
-    return response;
   } catch (error) {
     if (!isAppError(error)) {
       console.error(`[chat] ${requestId}`, error);

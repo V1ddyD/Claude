@@ -109,6 +109,9 @@ export const PG_UNIQUE_VIOLATION = '23505';
 export const PG_FOREIGN_KEY_VIOLATION = '23503';
 export const PG_CHECK_VIOLATION = '23514';
 export const PG_RLS_VIOLATION = '42501';
+/** Two transactions wanted the same rows in opposite orders. */
+export const PG_DEADLOCK_DETECTED = '40P01';
+export const PG_SERIALIZATION_FAILURE = '40001';
 
 /**
  * Find the Postgres SQLSTATE behind an error.

@@ -22,6 +22,27 @@ export class ScriptedModel implements ModelClient {
 
   async converse(request: ModelRequest): Promise<ModelTurn> {
     this.requests.push(request);
+    return this.take();
+  }
+
+  /**
+   * Streams the scripted text word by word.
+   *
+   * Chunked rather than emitted whole so the streaming path is genuinely
+   * exercised: a consumer that only works when the entire message arrives in
+   * one delta is not a streaming consumer.
+   */
+  async stream(request: ModelRequest, onDelta: (text: string) => void): Promise<ModelTurn> {
+    this.requests.push(request);
+    const turn = this.take();
+
+    for (const chunk of turn.text.match(/\S+\s*/g) ?? []) {
+      onDelta(chunk);
+    }
+    return turn;
+  }
+
+  private take(): ModelTurn {
     const turn = this.script[this.index++] ?? { text: '' };
 
     return {
