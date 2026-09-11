@@ -23,7 +23,7 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**M5 — Streaming, evaluation and operations, complete.** Built and verified so far:
+**M6 — Production readiness, complete.** Built and verified so far:
 
 - Schema applied and migrated (47 tables, 44 tenant-scoped)
 - Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
@@ -60,8 +60,15 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 - Test drive cancellation that releases the car, and a single-use link so a customer can
   look up their own request
 
-236 tests pass against a real PostgreSQL 16, stable across repeated runs, including
-**the spec §44 demonstration scenario end to end**. Next: **M6 — production readiness.**
+- **A dealership is configuration, not a release** — `npm run onboard` brings one up on
+  its own hostname, timezone, currency and ticket series, proven by a test that stands up
+  a third dealership from a config object alone
+
+247 tests pass against a real PostgreSQL 16, stable across repeated runs, including
+**the spec §44 demonstration scenario end to end**.
+
+Operations: [`docs/07-operations.md`](docs/07-operations.md).
+Security: [`docs/08-security-review.md`](docs/08-security-review.md).
 
 > **One known gap.** No `ANTHROPIC_API_KEY` has been configured, so the model client is
 > written but has never run — everything around it is tested with a scripted model, and

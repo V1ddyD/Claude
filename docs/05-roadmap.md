@@ -93,7 +93,7 @@ recommended action — and no automated message to the customer.
 
 ---
 
-## M6 — Production readiness *(spec phases 14–15)* — next
+## M6 — Production readiness ✅ *(spec phases 14–15)*
 
 Security review against the §13 model. Rate limits and token budgets. Load and
 concurrency testing on booking. Accessibility audit. Error, loading and empty states

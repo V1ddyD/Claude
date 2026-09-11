@@ -529,7 +529,67 @@ so that it is one command when a key exists:
 
 ---
 
-## M6 — next
+## M6 — Production readiness ✅
 
-Production readiness: accessibility, error and empty states, deployment, and onboarding a
-second dealership by configuration alone — the real test of the multi-tenant claim.
+### The exit criterion, met
+
+**A dealership is now configuration, not a release.**
+
+```bash
+npm run onboard -- dealerships/northwind.example.json
+```
+
+`tests/integration/onboarding.test.ts` brings up a third dealership — Meridian, on
+Europe/Berlin, in EUR, in German, with two opening days a week and its own ticket series
+— from a config object alone, and checks that it is genuinely its own business: its own
+hostname, brand, hours, tunable rules and data, with nothing of Sinclair's reaching its
+assistant prompt. Onboarding twice updates rather than duplicates, a hostname that
+belongs to another dealership is refused, and an incomplete configuration warns rather
+than fails.
+
+If that suite ever needs a code change to pass, the multi-tenant claim is false. That is
+the point of it.
+
+### Also built
+
+- **Error, loading and not-found states.** A customer sees something true and a way
+  forward, never a stack trace — with an opaque digest so a phone call can be matched to
+  a log entry without exposing anything about the failure.
+- **`docs/07-operations.md`** — deploying, the two connection strings and why they differ,
+  what the scheduler drives, and what to check first for each of the five failures most
+  likely to happen.
+- **`docs/08-security-review.md`** — the §13 model checked line by line against running
+  code, with the deliberate exceptions named and the open items assessed rather than
+  hidden.
+
+### Security review findings
+
+Clean on every control checked: no secret in the client bundle, isolation enforced and
+failing closed, every portal route and server action authorizing independently, no SQL
+built from user input, the webhook verifying its signature before parsing the body, and
+`audit_logs` holding only `INSERT, SELECT` for the application role.
+
+Five modules legitimately open their own connection or read outside a tenant context.
+Each is named in the lint rule that would otherwise ban it, so a sixth cannot appear
+unnoticed.
+
+Open, and assessed rather than quietly carried: no MFA; fixed-window rather than sliding
+rate limiting; no written secret-rotation procedure; and the development auth adapter,
+which refuses to load in production but is still worth deleting once Supabase is
+provisioned.
+
+---
+
+## What remains
+
+**One thing needs you, and one thing needs a decision.**
+
+1. **A credential.** The assistant has still never spoken to Claude. `npm run eval:live`
+   is built, metered and capped at $2.00; a full run costs about $0.34. This is the only
+   part of the product whose behaviour is unmeasured.
+2. **A deployment.** Nothing has been deployed. The runbook covers it, but the accounts
+   are yours.
+
+Everything else is deliberate scope: no visual configurator, no comparison or finance
+pages, no analytics, no tenant settings UI. All are capabilities the assistant already
+has; what is missing is a second way to reach them.

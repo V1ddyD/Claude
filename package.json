@@ -19,7 +19,8 @@
     "db:seed": "tsx db/seeds/index.ts",
     "db:reset": "tsx db/seeds/reset.ts",
     "eval": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts",
-    "eval:live": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --live"
+    "eval:live": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --live",
+    "onboard": "tsx --import ./scripts/server-only-shim.mjs scripts/onboard.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",

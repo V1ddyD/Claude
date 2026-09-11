@@ -105,6 +105,9 @@ export default [
       // why — the rule exists so a fourth one cannot appear unnoticed.
       'src/server/db/control-plane.ts',
       'src/server/auth/dev-directory.ts',
+      // Creating a tenant necessarily precedes a tenant context — the row every
+      // other query is scoped to does not exist yet.
+      'src/server/services/onboarding/index.ts',
     ],
     rules: {
       'no-restricted-imports': [
