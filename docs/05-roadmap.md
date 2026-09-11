@@ -58,7 +58,7 @@ website was built on assumptions about it.
 
 ---
 
-## M4 — Depth *(spec phases 6–11)* — next
+## M4 — The assistant ✅ *(rescoped: the chatbot is the product)*
 
 Now the surfaces, each against a working spine.
 
@@ -82,7 +82,7 @@ selling mid-conversation, an email provider failure, and a retry that must not d
 
 ---
 
-## M5 — Automation and analytics *(spec phases 12–13)*
+## M5 — Streaming, evaluation and automation — next
 
 Follow-up rules and staff tasks. Staff notifications, deduplicated. Hold expiry.
 Operational analytics: leads over time, priority mix, conversion, response time, popular

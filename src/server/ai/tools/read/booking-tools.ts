@@ -9,7 +9,8 @@ export const getAvailableTestDriveSlots_tool = defineTool({
   summary:
     'Bookable test drive times. Offers only times when both a specialist and a ' +
     'demonstrator are free. Always call this before proposing a time — never guess ' +
-    'one from opening hours.',
+    'one from opening hours. Pass the same modelSlug you will book: availability is ' +
+    'per model, and times free for one car are not necessarily free for another.',
   input: z.object({
     modelSlug: z.string().max(40).optional(),
     /** Inclusive, YYYY-MM-DD in the dealership's local time. */

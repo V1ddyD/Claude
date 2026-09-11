@@ -97,7 +97,15 @@ export default [
   // ---- Only one module opens a connection. ----
   {
     files: ['src/**/*.ts', 'src/**/*.tsx'],
-    ignores: ['src/server/db/client.ts', 'src/server/db/migrate.ts', 'src/server/auth/dev-directory.ts'],
+    ignores: [
+      'src/server/db/client.ts',
+      'src/server/db/migrate.ts',
+      // Control-plane and identity-directory reads that legitimately need the
+      // owner connection. Each is a single, named module with a comment saying
+      // why — the rule exists so a fourth one cannot appear unnoticed.
+      'src/server/db/control-plane.ts',
+      'src/server/auth/dev-directory.ts',
+    ],
     rules: {
       'no-restricted-imports': [
         'error',

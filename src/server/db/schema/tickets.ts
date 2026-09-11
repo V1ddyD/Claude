@@ -1,5 +1,6 @@
 import {
-  pgTable, uuid, text, boolean, timestamp, integer, primaryKey, unique,
+  pgTable, uuid, text, boolean, timestamp, integer, smallint, bigint, jsonb,
+  primaryKey, unique,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -39,6 +40,48 @@ export const tickets = pgTable(
   },
   (t) => [unique().on(t.tenantId, t.number)],
 );
+
+export const financeRequests = pgTable('finance_requests', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: uuid('tenant_id').notNull(),
+  customerId: uuid('customer_id').notNull(),
+  leadId: uuid('lead_id'),
+  ticketId: uuid('ticket_id'),
+  vehiclePriceCents: bigint('vehicle_price_cents', { mode: 'number' }).notNull(),
+  downPaymentCents: bigint('down_payment_cents', { mode: 'number' }).notNull().default(0),
+  termMonths: smallint('term_months').notNull(),
+  aprBps: integer('apr_bps'),
+  /** The figures quoted, stored as an estimate. Never an approval. */
+  estimate: jsonb('estimate').notNull(),
+  status: text('status').notNull().default('new')
+    .$type<'new' | 'in_review' | 'referred' | 'closed'>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const tradeInRequests = pgTable('trade_in_requests', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: uuid('tenant_id').notNull(),
+  customerId: uuid('customer_id').notNull(),
+  leadId: uuid('lead_id'),
+  ticketId: uuid('ticket_id'),
+  vehicleYear: smallint('vehicle_year').notNull(),
+  vehicleMake: text('vehicle_make').notNull(),
+  vehicleModel: text('vehicle_model').notNull(),
+  vehicleTrim: text('vehicle_trim'),
+  mileageKm: integer('mileage_km').notNull(),
+  condition: text('condition').notNull().$type<'excellent' | 'good' | 'fair' | 'poor'>(),
+  vin: text('vin'),
+  ownsOutright: boolean('owns_outright'),
+  payoffCents: bigint('payoff_cents', { mode: 'number' }),
+  notes: text('notes'),
+  /** Null until a human inspects the vehicle. The AI never fills this in. */
+  appraisedValueCents: bigint('appraised_value_cents', { mode: 'number' }),
+  appraisedBy: uuid('appraised_by'),
+  appraisedAt: timestamp('appraised_at', { withTimezone: true }),
+  status: text('status').notNull().default('new')
+    .$type<'new' | 'inspection_booked' | 'appraised' | 'closed'>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const ticketMessages = pgTable('ticket_messages', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),

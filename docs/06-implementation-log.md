@@ -297,7 +297,101 @@ move.
 
 ---
 
-## M4 — Depth — next
+## M4 — The assistant ✅
 
-The customer website, the configurator, the chat interface, the full tool set, email
-delivery, and the rest of the Dealer Portal — each against a spine that already works.
+**Reprioritised.** The chatbot is the product; the website is the environment it is
+tested in. M4 was rescoped around the assistant's capability surface rather than around
+the site, and the site got the smallest treatment that makes it a credible testbed.
+
+### Built
+
+| Area | Where |
+|---|---|
+| 22 tools, from 9 | `src/server/ai/tools/` |
+| Finance estimator (pure) | `src/server/services/finance/` |
+| One path for every customer request | `src/server/services/tickets/index.ts` |
+| Conversation memory — pinned facts | `src/server/ai/context.ts` |
+| The assistant interface | `src/components/site/assistant.tsx` |
+| Confirmation slip (§21) | `src/components/site/confirmation-slip.tsx` |
+| Email provider, templates, outbox drain | `src/server/services/email/` |
+| Delivery webhook | `src/app/api/webhooks/email/` |
+| Control-plane tenant enumeration | `src/server/db/control-plane.ts` |
+| Site: home, models, model detail | `src/app/(site)/` |
+
+**The tool set.** Catalogue (search, model, powertrains, trims, colours, options,
+features, price, compare, inventory), advice (finance estimate, dealership information,
+hours, test drive slots) and actions (contact details, save build, test drive, callback,
+enquiry, trade-in, financing, human handoff). Every write tool requires explicit
+`contactConsent: true` — a literal in the schema, so it cannot be called without it.
+
+**Nothing promises an outcome.** A trade-in request returns
+`valuation: 'none — a trade-in value requires an in-person inspection'`; a financing
+request returns `approval: 'none — a specialist reviews financing and confirms terms'`;
+a handoff returns `'A specialist has been notified and will follow up. They have NOT
+replied yet.'` The refusal is in the data the model reads, not only in the prompt.
+
+**Memory.** Pinned facts are assembled from the lead's structured signals plus the
+subject of recent tool calls, so "how much is the Premium?" resolves to the car the
+customer is looking at and nobody is asked for their budget twice. Contact details and
+internal state are deliberately never pinned.
+
+**Email.** Queued in the business transaction → `accepted` only when the provider
+accepts → `delivered` only from the provider's webhook. With no provider configured the
+message stays queued and nothing ever reports success.
+
+### Verified
+
+200 tests, up from 175.
+
+### Three bugs the tests found
+
+1. **The customer site could not resolve its tenant.** Hostname resolution joined
+   `tenant_domains` to `tenants` in one query; `tenants` is scoped to the caller's own
+   row and no context exists yet, so RLS returned nothing — silently. Every other path
+   resolves inside a context, so nothing caught it until the site actually ran.
+   Resolution is now two steps: the domain gives an id, the id gives a context. Regression
+   suite in `tests/integration/tenant-resolution.test.ts`.
+
+2. **The background worker claimed nothing, and reported success.** It queried the job
+   queue across all tenants as the application role; RLS refused, the batch came back
+   empty, and `runWorker` cheerfully returned `{claimed: 0}`. The worker now enumerates
+   tenants through the control plane and does every piece of work inside a tenant
+   context. The same bug was latent in the outbox drain. `tests/integration/worker.test.ts`
+   exists because nothing watches a worker fail.
+
+3. **Availability is per model, and a test proved it.** Slots free for *some*
+   demonstrator are not free for *the S5's* demonstrator. The tool description now says
+   so explicitly, and the demonstration passes the model to both the slot query and the
+   booking — which is what the assistant does.
+
+Plus a fixture bug worth noting: the fake email provider returned one id for every
+message, which made delivery lookups ambiguous the moment a drain swept more than one.
+Real providers never do that.
+
+### What is still NOT verified
+
+**No live model call has been made.** Still no `ANTHROPIC_API_KEY`. The client is written
+against the current API and the whole spine around it is exercised with a scripted model,
+but the assistant has never spoken to Claude. This is now the single largest gap: the
+product is the chatbot, and the chatbot's own behaviour — tool selection, phrasing,
+when it decides to hand off — is the one part that cannot be asserted without a key.
+
+**Responses are not streamed.** The tool loop needs complete messages, so the endpoint
+returns the reply in one piece and the interface shows a pending state. For a
+conversational product this is a real UX gap, not a cosmetic one. Streaming the final
+turn (after the tool loop settles) is the fix and is the first thing I would do in M5.
+
+### Deliberately not built
+
+- **A visual configurator.** The pricing engine and the tools behind one are complete and
+  tested; the interactive page is a website feature, and the website is not the product.
+- **Comparison and finance pages.** Both capabilities exist as tools, which is where they
+  matter. The assistant can compare two cars and estimate a payment today.
+- **Portal depth** — assignment, status transitions, notes, tickets, analytics. M5.
+
+---
+
+## M5 — next
+
+Streaming, the AI evaluation corpus once a key exists, follow-up automation, and portal
+depth: assignment, status transitions, staff notes and the ticket queue.

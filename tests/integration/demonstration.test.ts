@@ -114,13 +114,15 @@ describe('the demonstration scenario', () => {
     expect(priceRow!.tool_result.total.cents).toBe(5_890_000);
 
     // ---- 4. "I'd like to test drive it Saturday." ------------------------
-    // Ask across the whole bookable horizon and take the first free time,
-    // rather than naming a day that another test may already have filled — or
-    // that falls outside the dealership's 14-day booking horizon.
+    // Asked FOR THE S5, because that is the car being booked. Availability is
+    // per model: a slot when some demonstrator is free is not necessarily a
+    // slot when the S5 demonstrator is free, and the assistant passes the model
+    // to both the slot query and the booking for exactly that reason.
     const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
       getAvailableTestDriveSlots(db, TENANT, {
         from: new Date(Date.now() + 2 * 864e5),
         to: new Date(Date.now() + 13 * 864e5),
+        modelSlug: 's5',
       }),
     );
     expect(slots.length).toBeGreaterThan(0);

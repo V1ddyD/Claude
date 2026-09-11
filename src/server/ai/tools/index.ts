@@ -3,8 +3,17 @@ import {
   searchVehicles, getVehicle, getVehiclePowertrains, getVehicleTrims,
   getVehicleColours, calculateVehiclePrice, checkInventory,
 } from './read/catalogue-tools';
+import {
+  getVehicleOptions, compareVehicles, calculateFinanceEstimateTool,
+  getDealershipInformation, getDealershipHours, getVehicleFeatures,
+} from './read/advice-tools';
 import { getAvailableTestDriveSlots_tool } from './read/booking-tools';
 import { createTestDriveTool } from './write/create-test-drive';
+import {
+  createCallbackRequest, createSupportTicket, createTradeInRequest,
+  createFinancingRequestTool, requestHumanHandoff,
+} from './write/requests';
+import { saveBuild, updateContactPreferences } from './write/build';
 
 /**
  * Everything the assistant can do. Nothing outside this list is reachable from
@@ -21,15 +30,33 @@ import { createTestDriveTool } from './write/create-test-drive';
  *   anything destructive       — nothing the assistant touches deletes
  */
 export const TOOLS: AnyTool[] = [
+  // Catalogue
   searchVehicles,
   getVehicle,
   getVehiclePowertrains,
   getVehicleTrims,
   getVehicleColours,
+  getVehicleOptions,
+  getVehicleFeatures,
   calculateVehiclePrice,
+  compareVehicles,
   checkInventory,
+
+  // Advice
+  calculateFinanceEstimateTool,
+  getDealershipInformation,
+  getDealershipHours,
   getAvailableTestDriveSlots_tool,
+
+  // Actions
+  updateContactPreferences,
+  saveBuild,
   createTestDriveTool,
+  createCallbackRequest,
+  createSupportTicket,
+  createTradeInRequest,
+  createFinancingRequestTool,
+  requestHumanHandoff,
 ];
 
 let cached: ToolRegistry | undefined;

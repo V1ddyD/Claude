@@ -82,6 +82,7 @@ export async function POST(request: NextRequest) {
       message: reply.text,
       conversationId: session.conversationId,
       degraded: reply.degraded,
+      ...(reply.receipt ? { receipt: reply.receipt } : {}),
     });
 
     if (session.visitorId !== existingVisitor) {

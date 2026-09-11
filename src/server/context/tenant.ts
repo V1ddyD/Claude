@@ -1,6 +1,7 @@
 import 'server-only';
 import { eq, sql } from 'drizzle-orm';
 import { withTenant, withoutTenantScope } from '@/server/db/tenant-db';
+import { devTenantIdBySlug } from '@/server/db/control-plane';
 import { tenantDomains, tenants } from '@/server/db/schema';
 import { AppError } from '@/server/errors';
 import { env } from '@/server/config/env';
@@ -38,32 +39,24 @@ export async function resolveTenantByHost(host: string | null): Promise<Resolved
   const cached = cache.get(hostname);
   if (cached && cached.expires > Date.now()) return cached.tenant;
 
-  const tenant = await withoutTenantScope('tenant-resolution', async (db) => {
-    const byDomain = await db
-      .select({
-        id: tenants.id,
-        slug: tenants.slug,
-        brandName: tenants.brandName,
-        legalName: tenants.legalName,
-        timezone: tenants.timezone,
-        currency: tenants.currency,
-        locale: tenants.locale,
-        ticketPrefix: tenants.ticketPrefix,
-        status: tenants.status,
-      })
-      .from(tenantDomains)
-      .innerJoin(tenants, eq(tenants.id, tenantDomains.tenantId))
-      .where(eq(tenantDomains.hostname, hostname))
-      .limit(1);
+  // Two steps, and it has to be two.
+  //
+  // `tenant_domains` is readable without a context — it is the one table that
+  // must be, because resolution happens BEFORE a tenant is known, and it holds
+  // nothing but a hostname and the id it maps to. `tenants` is not: it is
+  // scoped to the caller's own row. So the hostname gives us an id, and the id
+  // gives us a context in which the tenant row is readable.
+  //
+  // Joining the two in one query looks obvious and silently returns nothing.
+  const tenantId = await resolveTenantIdForHost(hostname);
+  if (!tenantId) {
+    throw new AppError('TENANT_NOT_RESOLVED', 'This site is not available.', {
+      internal: { hostname },
+    });
+  }
 
-    if (byDomain[0]) return byDomain[0];
-
-    // Development convenience only: localhost and preview URLs are not
-    // registered domains. Refused in production, where an unrecognised host
-    // must not silently serve some default dealership's data.
-    if (env.NODE_ENV === 'production') return undefined;
-
-    const fallback = await db
+  const tenant = await withTenant(tenantId, async (db) => {
+    const rows = await db
       .select({
         id: tenants.id,
         slug: tenants.slug,
@@ -76,26 +69,39 @@ export async function resolveTenantByHost(host: string | null): Promise<Resolved
         status: tenants.status,
       })
       .from(tenants)
-      .where(eq(tenants.slug, env.DEFAULT_TENANT_SLUG))
+      .where(eq(tenants.id, tenantId))
       .limit(1);
-
-    return fallback[0];
+    return rows[0];
   });
 
-  if (!tenant) {
+  if (!tenant || tenant.status !== 'active') {
     throw new AppError('TENANT_NOT_RESOLVED', 'This site is not available.', {
-      internal: { hostname },
-    });
-  }
-  if (tenant.status !== 'active') {
-    throw new AppError('TENANT_NOT_RESOLVED', 'This site is not available.', {
-      internal: { hostname, status: tenant.status },
+      internal: { hostname, status: tenant?.status },
     });
   }
 
   const { status: _status, ...resolved } = tenant;
   cache.set(hostname, { tenant: resolved, expires: Date.now() + TTL_MS });
   return resolved;
+}
+
+async function resolveTenantIdForHost(hostname: string): Promise<string | null> {
+  const byDomain = await withoutTenantScope('tenant-resolution', (db) =>
+    db
+      .select({ tenantId: tenantDomains.tenantId })
+      .from(tenantDomains)
+      .where(eq(tenantDomains.hostname, hostname))
+      .limit(1),
+  );
+
+  if (byDomain[0]) return byDomain[0].tenantId;
+
+  // Development only. In production an unregistered hostname must not quietly
+  // serve some default dealership's data — it is a misconfiguration, and
+  // guessing hides it.
+  if (env.NODE_ENV === 'production') return null;
+
+  return devTenantIdBySlug(env.DEFAULT_TENANT_SLUG);
 }
 
 /**

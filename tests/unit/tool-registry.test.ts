@@ -91,9 +91,54 @@ describe('the real tool set', () => {
     }
   });
 
-  it('has exactly one write tool in the walking skeleton', () => {
-    const writes = TOOLS.filter((t) => t.scope === 'write');
-    expect(writes.map((t) => t.name)).toEqual(['createTestDrive']);
+  it('pins the exact set of write tools', () => {
+    // Adding a tool that can change data should be a deliberate act that
+    // updates this list, not something that slips in with a feature.
+    const writes = TOOLS.filter((t) => t.scope === 'write').map((t) => t.name).sort();
+    expect(writes).toEqual([
+      'createCallbackRequest',
+      'createFinancingRequest',
+      'createSupportTicket',
+      'createTestDrive',
+      'createTradeInRequest',
+      'requestHumanHandoff',
+      'saveBuild',
+      'updateContactPreferences',
+    ]);
+  });
+
+  it('requires explicit contact consent on every tool that stores contact details', () => {
+    // Consent is a literal `true` in the schema, so a tool cannot be called
+    // without the customer having agreed (spec §31).
+    const consentTools = [
+      'createCallbackRequest', 'createSupportTicket', 'createTradeInRequest',
+      'createFinancingRequest', 'requestHumanHandoff', 'createTestDrive',
+      'updateContactPreferences',
+    ];
+    for (const name of consentTools) {
+      const tool = TOOLS.find((t) => t.name === name)!;
+      const shape = (tool.input as { shape?: Record<string, unknown> }).shape ?? {};
+      expect.soft(Object.keys(shape), `${name} must take contactConsent`).toContain(
+        'contactConsent',
+      );
+    }
+  });
+
+  it('never lets a request tool promise an outcome', () => {
+    // A trade-in request is not a valuation and a financing request is not an
+    // approval (spec §41, §40). The projections say so in the result itself.
+    const tradeIn = TOOLS.find((t) => t.name === 'createTradeInRequest')!;
+    const finance = TOOLS.find((t) => t.name === 'createFinancingRequest')!;
+
+    const tradeInResult = JSON.stringify(
+      tradeIn.project({ ticketNumber: 'SIN-2026-1', confirmationEmailQueued: true }, {} as never),
+    );
+    const financeResult = JSON.stringify(
+      finance.project({ ticketNumber: 'SIN-2026-2', confirmationEmailQueued: true }, {} as never),
+    );
+
+    expect(tradeInResult).toContain('inspection');
+    expect(financeResult).toContain('specialist reviews');
   });
 
   it('does not include the tools that would breach a stated rule', () => {

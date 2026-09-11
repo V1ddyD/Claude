@@ -1,7 +1,9 @@
 import 'server-only';
 import { claimJobs, completeJob, failJob, type Job } from './queue';
+import { listActiveTenantIds } from '@/server/db/control-plane';
 import { extractAndScore } from '@/server/ai/extraction';
 import { releaseExpiredReservations } from '@/server/services/inventory';
+import { drainOutbox } from '@/server/services/email/outbox';
 import { withTenant } from '@/server/db/tenant-db';
 
 /** Job handlers. Each must be idempotent: a retry re-runs the whole handler. */
@@ -12,6 +14,13 @@ const HANDLERS: Record<string, (job: Job) => Promise<void>> = {
       tenantId: job.tenantId,
       conversationId: String(job.payload.conversationId),
     });
+  },
+
+  send_email: async (job) => {
+    // The queue row is a trigger; the outbox is the source of truth, so this
+    // drains whatever is due for the tenant rather than one named message.
+    if (!job.tenantId) return;
+    await drainOutbox(job.tenantId);
   },
 
   expire_holds: async (job) => {
@@ -27,29 +36,39 @@ export interface WorkerReport {
 }
 
 export async function runWorker(limit = 10): Promise<WorkerReport> {
-  const jobs = await claimJobs(limit);
+  // Tenants are enumerated through the control plane; every job then runs in
+  // its own tenant context, under RLS, as the application role.
+  const tenantIds = await listActiveTenantIds();
+
+  let claimed = 0;
   let succeeded = 0;
   let failed = 0;
 
-  for (const job of jobs) {
-    const handler = HANDLERS[job.kind];
-    if (!handler) {
-      await failJob(job.id, new Error(`No handler for job kind "${job.kind}"`));
-      failed++;
-      continue;
-    }
-    try {
-      await handler(job);
-      await completeJob(job.id);
-      succeeded++;
-    } catch (error) {
-      // One failing job must not stop the batch.
-      await failJob(job.id, error);
-      failed++;
+  for (const tenantId of tenantIds) {
+    const jobs = await claimJobs(tenantId, limit);
+    claimed += jobs.length;
+
+    for (const job of jobs) {
+      const handler = HANDLERS[job.kind];
+      if (!handler) {
+        await failJob(tenantId, job.id, new Error(`No handler for job kind "${job.kind}"`));
+        failed++;
+        continue;
+      }
+      try {
+        await handler(job);
+        await completeJob(tenantId, job.id);
+        succeeded++;
+      } catch (error) {
+        // One failing job must not stop the batch, or one tenant's problem
+        // becomes every tenant's outage.
+        await failJob(tenantId, job.id, error);
+        failed++;
+      }
     }
   }
 
-  return { claimed: jobs.length, succeeded, failed };
+  return { claimed, succeeded, failed };
 }
 
 export { enqueue } from './queue';

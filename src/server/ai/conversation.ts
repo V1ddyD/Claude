@@ -8,6 +8,7 @@ import { toolRegistry } from '@/server/ai/tools';
 import type { ToolContext } from '@/server/ai/tools/define';
 import { modelClient, type ModelClient } from '@/server/ai/client';
 import { buildSystemPrompt } from '@/server/ai/prompts/system';
+import { buildPinnedFacts } from '@/server/ai/context';
 import { formatMoney } from '@/server/services/pricing';
 import { AppError } from '@/server/errors';
 
@@ -24,11 +25,29 @@ const MAX_TOOL_CALLS_PER_TURN = 6;
 const MAX_WRITES_PER_TURN = 1;
 const HISTORY_TURNS = 12;
 
+/**
+ * An on-screen confirmation for a completed action (spec §21).
+ *
+ * Captured from the write tool's own result rather than parsed out of the
+ * assistant's prose: the customer's receipt must reflect what the backend
+ * actually committed, not what the model said about it.
+ */
+export interface Receipt {
+  ticketNumber: string;
+  action: string;
+  vehicle?: string;
+  when?: string;
+  confirmationCode?: string;
+  /** Queued is not delivered. The wording travels with the fact. */
+  confirmationEmail?: string;
+}
+
 export interface ConversationReply {
   text: string;
   conversationId: string;
   toolsUsed: string[];
   degraded: boolean;
+  receipt?: Receipt;
 }
 
 export async function respondToMessage(params: {
@@ -63,6 +82,10 @@ export async function respondToMessage(params: {
     await appendMessage(db, params.conversationId, { role: 'user', content: params.userMessage });
 
     const history = await loadHistory(db, params.conversationId);
+    // What the customer has already established, so they are never asked twice
+    // and an unqualified "the Premium" resolves to the car they are looking at.
+    const pinned = await buildPinnedFacts(db, params.conversationId);
+
     const system = buildSystemPrompt({
       brandName: tenant.brandName,
       timezone: tenant.timezone,
@@ -70,7 +93,7 @@ export async function respondToMessage(params: {
       currency: tenant.currency,
       catalogueDigest: await buildCatalogueDigest(db, tenant),
       responseSlaHours: 1,
-      knownFacts: [],
+      knownFacts: pinned.facts,
       nowLocal: new Intl.DateTimeFormat(tenant.locale, {
         timeZone: tenant.timezone, dateStyle: 'full',
       }).format(now),
@@ -96,6 +119,7 @@ export async function respondToMessage(params: {
     const toolsUsed: string[] = [];
     let writes = 0;
     let finalText = '';
+    let receipt: Receipt | undefined;
 
     for (let iteration = 0; iteration < MAX_TOOL_CALLS_PER_TURN; iteration++) {
       const turn = await client.converse({
@@ -137,6 +161,10 @@ export async function respondToMessage(params: {
         const outcome = await registry.dispatch(ctx, use.name, use.input);
         toolsUsed.push(use.name);
 
+        if (outcome.ok && definition?.scope === 'write') {
+          receipt = toReceipt(use.name, outcome.result) ?? receipt;
+        }
+
         results.push({
           type: 'tool_result',
           tool_use_id: use.id,
@@ -172,8 +200,37 @@ export async function respondToMessage(params: {
       conversationId: params.conversationId,
       toolsUsed,
       degraded: false,
+      ...(receipt ? { receipt } : {}),
     };
   });
+}
+
+const RECEIPT_ACTIONS: Record<string, string> = {
+  createTestDrive: 'Test drive booked',
+  createCallbackRequest: 'Callback requested',
+  createSupportTicket: 'Enquiry received',
+  createTradeInRequest: 'Trade-in appraisal requested',
+  createFinancingRequest: 'Financing enquiry received',
+  requestHumanHandoff: 'Passed to a specialist',
+};
+
+function toReceipt(toolName: string, result: unknown): Receipt | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  const data = result as Record<string, unknown>;
+  if (typeof data.ticketNumber !== 'string') return undefined;
+
+  return {
+    ticketNumber: data.ticketNumber,
+    action: RECEIPT_ACTIONS[toolName] ?? 'Request received',
+    ...(typeof data.vehicle === 'string' ? { vehicle: data.vehicle } : {}),
+    ...(typeof data.when === 'string' ? { when: data.when } : {}),
+    ...(typeof data.confirmationCode === 'string'
+      ? { confirmationCode: data.confirmationCode }
+      : {}),
+    ...(typeof data.confirmationEmail === 'string'
+      ? { confirmationEmail: data.confirmationEmail }
+      : {}),
+  };
 }
 
 async function appendMessage(

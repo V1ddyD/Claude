@@ -1,7 +1,7 @@
 import 'server-only';
 import { sql } from 'drizzle-orm';
 import { jobQueue } from '@/server/db/schema';
-import { withoutTenantScope, type TenantDb } from '@/server/db/tenant-db';
+import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 
 /**
  * Postgres-backed job queue.
@@ -47,13 +47,22 @@ export async function enqueue(
 }
 
 /**
- * Claim a batch of due jobs.
+ * Claim a batch of due jobs for ONE tenant.
+ *
+ * Scoped rather than global because the worker runs as the application role
+ * under RLS: there is no cross-tenant view of the queue, and there should not
+ * be. The worker enumerates tenants through the control plane and calls this
+ * per tenant.
  *
  * FOR UPDATE SKIP LOCKED lets several workers run concurrently without any two
  * claiming the same job, and without one long job blocking the queue behind it.
  */
-export async function claimJobs(limit = 10, workerId = 'worker'): Promise<Job[]> {
-  return withoutTenantScope('worker', async (db) => {
+export async function claimJobs(
+  tenantId: string,
+  limit = 10,
+  workerId = 'worker',
+): Promise<Job[]> {
+  return withTenant(tenantId, async (db) => {
     const rows = (await db.execute(sql`
       UPDATE job_queue SET
         status = 'running',
@@ -62,7 +71,7 @@ export async function claimJobs(limit = 10, workerId = 'worker'): Promise<Job[]>
         attempts = attempts + 1
       WHERE id IN (
         SELECT id FROM job_queue
-        WHERE status = 'pending' AND run_at <= now()
+        WHERE status = 'pending' AND run_at <= now() AND tenant_id = ${tenantId}
         ORDER BY run_at
         FOR UPDATE SKIP LOCKED
         LIMIT ${limit}
@@ -73,8 +82,8 @@ export async function claimJobs(limit = 10, workerId = 'worker'): Promise<Job[]>
   });
 }
 
-export async function completeJob(jobId: string): Promise<void> {
-  await withoutTenantScope('worker', async (db) => {
+export async function completeJob(tenantId: string, jobId: string): Promise<void> {
+  await withTenant(tenantId, async (db) => {
     await db.execute(sql`UPDATE job_queue SET status = 'done', locked_by = NULL WHERE id = ${jobId}`);
   });
 }
@@ -85,10 +94,10 @@ export async function completeJob(jobId: string): Promise<void> {
  * Exponential backoff, then a dead state that stays visible to admins rather
  * than disappearing — a silently dead queue is worse than a loud one.
  */
-export async function failJob(jobId: string, error: unknown): Promise<void> {
+export async function failJob(tenantId: string, jobId: string, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
 
-  await withoutTenantScope('worker', async (db) => {
+  await withTenant(tenantId, async (db) => {
     await db.execute(sql`
       UPDATE job_queue SET
         status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,

@@ -23,7 +23,7 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**M3 — The walking skeleton, complete.** Built and verified so far:
+**M4 — The assistant, complete.** Built and verified so far:
 
 - Schema applied and migrated (47 tables, 44 tenant-scoped)
 - Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
@@ -43,12 +43,18 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 - A Dealer Portal showing the lead, its evidence, the appointment, the ticket and the
   whole conversation
 
-162 tests pass against a real PostgreSQL 16, including **the spec §44 demonstration
-scenario end to end**. Next: **M4 — the customer website and the rest of the portal.**
+- **22 assistant tools** — browse, compare, price, check stock, estimate finance, book a
+  test drive, request a callback, a trade-in appraisal or financing, or hand over to a
+  person. Every write requires explicit contact consent; none promises an outcome
+- Conversation memory, so the customer is never asked the same thing twice
+- A transactional email outbox that reports `delivered` only when the provider says so
 
-> **Not yet exercised:** no `ANTHROPIC_API_KEY` has been configured, so the model client
-> is written but has never run. Everything around it is tested with a scripted model.
-> See `docs/06-implementation-log.md` -> M3.
+200 tests pass against a real PostgreSQL 16, including **the spec §44 demonstration
+scenario end to end**. Next: **M5 — streaming, evaluation, automation.**
+
+> **Two known gaps.** No `ANTHROPIC_API_KEY` has been configured, so the model client is
+> written but has never run — everything around it is tested with a scripted model. And
+> replies are not yet streamed. Both are detailed in `docs/06-implementation-log.md` -> M4.
 
 ## Quick start
 
