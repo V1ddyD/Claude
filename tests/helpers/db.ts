@@ -1,6 +1,9 @@
 import postgres, { type Sql } from 'postgres';
 import { migrate } from '../../src/server/db/migrate';
-import { seedSinclair, seedSecondTenant } from '../../db/seeds/sinclair';
+import { seedSinclair, seedSecondTenant, SINCLAIR_TENANT_ID } from '../../db/seeds/sinclair';
+import { SINCLAIR_CATALOGUE } from '../../db/seeds/catalogue';
+import { writeModel } from '../../db/seeds/catalogue-writer';
+import { seedInventory } from '../../db/seeds/inventory';
 
 /**
  * Test database harness.
@@ -35,8 +38,23 @@ export async function prepareDatabase(): Promise<void> {
   const sql = postgres(ADMIN_URL, { max: 1, onnotice: () => {} });
   try {
     await sql`SET row_security = off`;
+
+    // Seed only once per database. Catalogue children (features, availability)
+    // are additive, so re-running would double them and quietly change counts
+    // the assertions depend on.
+    const [existing] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM vehicle_models WHERE tenant_id = ${SINCLAIR_TENANT_ID}
+    `;
+
     await seedSinclair(sql);
     await seedSecondTenant(sql);
+
+    if (existing!.count === 0) {
+      for (const model of SINCLAIR_CATALOGUE) {
+        await writeModel(sql, SINCLAIR_TENANT_ID, model);
+      }
+      await seedInventory(sql, SINCLAIR_TENANT_ID);
+    }
   } finally {
     await sql.end({ timeout: 5 });
   }

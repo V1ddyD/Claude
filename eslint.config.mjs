@@ -119,7 +119,13 @@ export default [
     files: ['src/**/*.ts', 'src/**/*.tsx'],
     // migrate.ts is a CLI entry point that runs before the app boots, so it
     // reads its connection string directly rather than through the validated env.
-    ignores: ['src/server/config/env.ts', 'src/middleware.ts', 'src/server/db/migrate.ts'],
+    ignores: [
+      'src/server/config/env.ts',
+      // Populating process.env from a dotenv file is this module's entire job.
+      'src/server/config/load-env-file.ts',
+      'src/middleware.ts',
+      'src/server/db/migrate.ts',
+    ],
     rules: {
       'no-restricted-syntax': [
         'error',

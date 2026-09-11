@@ -27,7 +27,7 @@ see an empty portal. *(The Phase-0 harness in `db/validate/` becomes part of thi
 
 ---
 
-## M2 — Catalogue and pricing *(spec phase 5)* — next
+## M2 — Catalogue and pricing ✅ *(spec phase 5)*
 
 Catalogue repositories and services. The pricing engine: base + powertrain + trim +
 options + colour, with buildability validation against `model_configurations` and option
@@ -41,7 +41,7 @@ double-charged when standard on its trim; no build prices below its configuratio
 
 ---
 
-## M3 — The walking skeleton ⭐ *(the change to §59)*
+## M3 — The walking skeleton ⭐ *(the change to §59)* — next
 
 Deliberately unpolished, deliberately end to end:
 

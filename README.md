@@ -23,15 +23,20 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**M1 — Foundation, complete.** The architecture is in place and verified:
+**M2 — Catalogue and pricing, complete.** Built and verified so far:
 
 - Schema applied and migrated (47 tables, 44 tenant-scoped)
 - Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
 - Permission-based authorization, with the matrix asserted against the database
 - Audit logging that commits with the change it describes, append-only at the grant level
 - Dealer Portal signs in and renders per-role navigation for two separate tenants
+- A real catalogue — 10 models, 36 configurations, 51 options, 86 inventory units —
+  with a buildable matrix rather than a cartesian product
+- A pricing engine where every price is computed and invalid builds are refused with
+  the valid alternatives attached
+- An inventory state machine driven by a transition table, with optimistic concurrency
 
-36 tests pass against a real PostgreSQL 16. Next: **M2 — catalogue and pricing.**
+87 tests pass against a real PostgreSQL 16. Next: **M3 — the walking skeleton.**
 
 ## Quick start
 
@@ -39,7 +44,7 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 npm install
 ./scripts/test-db.sh start        # throwaway Postgres; writes .env.test.local
 npm run db:migrate
-npm run db:seed
+npm run db:seed                   # 10 models, 36 configurations, 86 units
 npm test
 npm run dev                       # portal at /portal
 ```

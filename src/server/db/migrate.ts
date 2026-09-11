@@ -14,6 +14,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import postgres from 'postgres';
+import { loadEnvFile } from './../config/load-env-file';
 
 const MIGRATIONS_DIR = join(process.cwd(), 'db', 'migrations');
 
@@ -70,6 +71,7 @@ export async function migrate(connectionString: string, opts: { quiet?: boolean 
 
 // Entry point for `npm run db:migrate`.
 if (import.meta.url === `file://${process.argv[1]}`) {
+  loadEnvFile();
   const url = process.env.DATABASE_ADMIN_URL ?? process.env.DATABASE_URL;
   if (!url) {
     console.error('DATABASE_ADMIN_URL (or DATABASE_URL) must be set');
