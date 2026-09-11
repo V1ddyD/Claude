@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+/*
+ * Sinclair design tokens.
+ *
+ * Restrained by intent (spec §35): a premium automotive brand, not a SaaS
+ * dashboard. Near-black and warm off-white, one accent, generous type.
+ * The full customer-facing system lands in M4; these are the primitives both
+ * surfaces share.
+ */
+@theme {
+  --color-ink-950: #0a0b0d;
+  --color-ink-900: #131519;
+  --color-ink-800: #1e2127;
+  --color-ink-700: #2c3038;
+  --color-ink-500: #6b7280;
+  --color-ink-300: #c9ccd2;
+  --color-ink-100: #ebecef;
+  --color-ink-50:  #f7f7f8;
+
+  --color-accent-600: #9a2a2a;
+  --color-accent-500: #b8353a;
+
+  --color-signal-high: #b8353a;
+  --color-signal-medium: #b07d2b;
+  --color-signal-low: #6b7280;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body { background: var(--color-ink-50); color: var(--color-ink-900); }
+
+/* Focus must remain visible: the portal is used all day, often by keyboard. */
+:focus-visible {
+  outline: 2px solid var(--color-accent-500);
+  outline-offset: 2px;
+}

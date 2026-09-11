@@ -1,6 +1,6 @@
 # Data Model
 
-The DDL is [`db/schema.sql`](../db/schema.sql), commented inline. This document covers
+The DDL is [`db/migrations/0001_initial_schema.sql`](../db/migrations/0001_initial_schema.sql), commented inline. This document covers
 only the decisions that are not obvious from reading it.
 
 **Verification status:** the schema applies cleanly to PostgreSQL 16, and its safety

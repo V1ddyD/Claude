@@ -23,18 +23,42 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**Phase 0 — architecture.** No application code yet, by design (spec §60, §63).
-What exists is the design that the implementation will follow.
+**M1 — Foundation, complete.** The architecture is in place and verified:
+
+- Schema applied and migrated (47 tables, 44 tenant-scoped)
+- Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
+- Permission-based authorization, with the matrix asserted against the database
+- Audit logging that commits with the change it describes, append-only at the grant level
+- Dealer Portal signs in and renders per-role navigation for two separate tenants
+
+36 tests pass against a real PostgreSQL 16. Next: **M2 — catalogue and pricing.**
+
+## Quick start
+
+```bash
+npm install
+./scripts/test-db.sh start        # throwaway Postgres; writes .env.test.local
+npm run db:migrate
+npm run db:seed
+npm test
+npm run dev                       # portal at /portal
+```
+
+Without Supabase configured, the portal signs in against seeded staff accounts.
+That adapter replaces the identity provider only — roles, permissions and tenant
+isolation are unchanged — and it refuses to load in production.
 
 ## Documents
 
 Read in order:
 
+0. [`docs/06-implementation-log.md`](docs/06-implementation-log.md) — what is built,
+   what is verified, and what each milestone changed about the plan.
 1. [`docs/00-architecture.md`](docs/00-architecture.md) — system architecture, tenancy,
    auth, AI tool layer, lead scoring, booking concurrency, email/tickets, security model.
 2. [`docs/01-data-model.md`](docs/01-data-model.md) — entity model and the reasoning
    behind the non-obvious tables.
-3. [`db/schema.sql`](db/schema.sql) — the proposed DDL, concrete and reviewable.
+3. [`db/migrations/0001_initial_schema.sql`](db/migrations/0001_initial_schema.sql) — the proposed DDL, concrete and reviewable.
 4. [`docs/02-project-structure.md`](docs/02-project-structure.md) — file layout and
    the layering rules that keep logic out of the UI.
 5. [`docs/03-ai-tools.md`](docs/03-ai-tools.md) — the tool contracts Claude is allowed

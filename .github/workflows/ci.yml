@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sinclair_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/sinclair_test
+      DATABASE_URL: postgres://app_user@localhost:5432/sinclair_test
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Allow the unprivileged app role to connect
+        # The role is created by migration 0002; it needs a password for TCP auth
+        # in CI. Deliberately still not the owner and not BYPASSRLS — the
+        # isolation suite asserts both.
+        run: |
+          npm run db:migrate
+          PGPASSWORD=postgres psql -h localhost -U postgres -d sinclair_test \
+            -c "ALTER ROLE app_user WITH PASSWORD 'app_user'"
+          echo "DATABASE_URL=postgres://app_user:app_user@localhost:5432/sinclair_test" >> "$GITHUB_ENV"
+
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: No server secret may reach the browser bundle
+        # The last line of defence behind the lint rules: whatever the import
+        # graph actually produced is searched for the shapes of real secrets.
+        run: |
+          set -euo pipefail
+          if grep -rIlE 'sk-ant-|service_role|SUPABASE_SERVICE_ROLE_KEY|ANTHROPIC_API_KEY|RESEND_API_KEY' \
+               .next/static 2>/dev/null; then
+            echo "::error::A server secret reference reached the client bundle"
+            exit 1
+          fi
+          echo "Client bundle is clean."
+
+      - name: Tenant isolation must never be skipped
+        # A deploy-gating suite is only a gate if it actually ran.
+        run: |
+          set -euo pipefail
+          npx vitest run tests/isolation --reporter=json --outputFile=/tmp/isolation.json
+          node -e '
+            const r = require("/tmp/isolation.json");
+            if (r.numTotalTests === 0) throw new Error("isolation suite ran no tests");
+            if (r.numPendingTests > 0) throw new Error(r.numPendingTests + " isolation tests were skipped");
+            console.log("Tenant isolation: " + r.numPassedTests + " assertions passed.");
+          '

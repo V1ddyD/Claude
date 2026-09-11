@@ -6,7 +6,7 @@ riskiest integration is proven first rather than last. See `docs/04-spec-review.
 
 ---
 
-## M0 — Architecture ✅ *(this phase)*
+## M0 — Architecture ✅
 
 Design, schema, tool contracts, spec review. No application code, per §60.
 
@@ -14,9 +14,9 @@ Design, schema, tool contracts, spec review. No application code, per §60.
 
 ---
 
-## M1 — Foundation *(spec phases 2–4)*
+## M1 — Foundation ✅ *(spec phases 2–4)*
 
-Next.js + TypeScript + Tailwind skeleton. Drizzle schema from `db/schema.sql` as
+Next.js + TypeScript + Tailwind skeleton. Drizzle schema from `db/migrations/0001_initial_schema.sql` as
 migration 0001, RLS generated for every tenant table. `withTenant()` and the repository
 layer. Supabase Auth, `staff_users`, the permission matrix, `requireStaff()`. Tenant
 resolution by hostname. Audit logging. Typed errors. CI: lint, typecheck, test, migrate.
@@ -27,7 +27,7 @@ see an empty portal. *(The Phase-0 harness in `db/validate/` becomes part of thi
 
 ---
 
-## M2 — Catalogue and pricing *(spec phase 5)*
+## M2 — Catalogue and pricing *(spec phase 5)* — next
 
 Catalogue repositories and services. The pricing engine: base + powertrain + trim +
 options + colour, with buildability validation against `model_configurations` and option
@@ -114,16 +114,23 @@ code change. That is the real test of whether the multi-tenant claim is true.
 
 ---
 
-## Open questions for the reviewer
+## Decisions (answered 2026-09-11)
 
-Answering these unblocks M1. Each has a default I'll take if there's no preference.
-
-| # | Question | Default if unanswered |
+| # | Question | Decision |
 |---|---|---|
-| 1 | Vehicle imagery: licensed stock, generated renders, or a photography-light editorial design? | Editorial — typography, spec tables, silhouettes. Genuinely premium without an asset budget. |
-| 2 | Market, currency and timezone for Sinclair? | CAD, `America/Toronto`, `en-CA`. |
-| 3 | Customer accounts in v1, or anonymous + magic link only? | Anonymous + scoped magic link. Accounts in M5. |
-| 4 | Email provider? | Resend. |
-| 5 | Is `docs/04-spec-review.md` §1 accepted — rules decide priority, the model extracts evidence? | Accepted as described. |
-| 6 | Conversation retention default? | 24 months, then redaction. |
-| 7 | MFA required for MANAGER and ADMIN? | Not in v1; required before tenant #2. |
+| 1 | Vehicle imagery | **Generated renders**, with the editorial treatment as the development fallback. Every image goes through one `<VehicleImage>` component with an editorial placeholder, so renders drop in per model as they land without touching page code. |
+| 2 | Market | **CAD, `America/Toronto`, `en-CA`.** Seeded as tenant defaults, not constants. |
+| 3 | Customer accounts | **Anonymous visitor + scoped magic link.** Accounts deferred to M5; `customers.auth_user_id` is already present so adding them is not a migration. |
+| 4 | Email provider | **Resend.** Behind an `EmailProvider` interface so the outbox does not depend on it. |
+| 5 | Lead priority | **Rules decide; the AI extracts evidence.** As described in `04-spec-review.md` §1. |
+| 6 | Conversation retention | **24 months, then redaction.** Tenant-configurable; a scheduled job redacts message bodies and PII while keeping transactional records. |
+| 7 | MFA | **Not in v1. Required for MANAGER and ADMIN before tenant #2 exists.** Tracked as an M6 exit item. |
+
+Decision 1 has a build consequence worth stating: because renders arrive incrementally,
+no page may assume an image exists. The placeholder is the default state, not an error
+state.
+
+Decision 3 has a security consequence: there is no customer login in v1, so every
+customer-facing data read is either public catalogue data or reached through a
+single-use scoped token. No session can be escalated into profile access, because there
+is no customer session to escalate.

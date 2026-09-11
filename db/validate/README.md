@@ -11,7 +11,7 @@ D=/tmp/pgval; rm -rf $D; mkdir -p $D; chown postgres:postgres $D
 su postgres -c "initdb -D $D/data -U postgres --auth=trust"
 su postgres -c "pg_ctl -D $D/data -o \"-k $D -c listen_addresses=''\" -l $D/log start"
 su postgres -c "psql -h $D -U postgres -c 'CREATE DATABASE sinclair'"
-su postgres -c "psql -h $D -U postgres -d sinclair -v ON_ERROR_STOP=1 -f db/schema.sql"
+su postgres -c "psql -h $D -U postgres -d sinclair -v ON_ERROR_STOP=1 -f db/migrations/0001_initial_schema.sql"
 su postgres -c "psql -h $D -U postgres -d sinclair -f db/validate/constraints.sql"
 su postgres -c "psql -h $D -U postgres -d sinclair -f db/validate/rls-setup.sql"
 su postgres -c "psql -h $D -U app_user  -d sinclair -f db/validate/rls-isolation.sql"
