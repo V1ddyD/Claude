@@ -60,12 +60,26 @@ scenario end to end**. Next: **M5 — streaming, evaluation, automation.**
 
 ```bash
 npm install
+cp .env.example .env.local        # set ANTHROPIC_API_KEY here, once
 ./scripts/test-db.sh start        # throwaway Postgres; writes .env.test.local
 npm run db:migrate
 npm run db:seed                   # 10 models, 36 configurations, 86 units
 npm test
-npm run dev                       # portal at /portal
+npm run dev                       # site at /, portal at /portal
 ```
+
+### The assistant's API key
+
+The key is **the operator's, set once, server-side**. Customers never supply, see, or
+are asked for one — a visitor opens the chat and types.
+
+It is read by exactly one module (`src/server/ai/client.ts`), has no `NEXT_PUBLIC_`
+alias, and never reaches the browser. Three independent things enforce that: an ESLint
+restricted-import rule, `tests/unit/key-never-reaches-customer.test.ts`, and a CI grep
+of the built client bundle.
+
+Without a key the assistant degrades to a contact form and says so in plain language.
+It never shows a customer anything about configuration.
 
 Without Supabase configured, the portal signs in against seeded staff accounts.
 That adapter replaces the identity provider only — roles, permissions and tenant
