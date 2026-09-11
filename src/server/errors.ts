@@ -110,10 +110,24 @@ export const PG_FOREIGN_KEY_VIOLATION = '23503';
 export const PG_CHECK_VIOLATION = '23514';
 export const PG_RLS_VIOLATION = '42501';
 
+/**
+ * Find the Postgres SQLSTATE behind an error.
+ *
+ * Walks the `cause` chain: query builders wrap the driver's error in their own,
+ * so the code is not on the object that was thrown. Reading only the top level
+ * silently misses every constraint violation — which means a customer racing
+ * for a slot sees a raw database error instead of "that time has just gone".
+ */
 export function pgErrorCode(err: unknown): string | undefined {
-  if (typeof err === 'object' && err !== null && 'code' in err) {
-    const code = (err as { code: unknown }).code;
-    return typeof code === 'string' ? code : undefined;
+  let current: unknown = err;
+
+  for (let depth = 0; depth < 5 && current; depth++) {
+    if (typeof current === 'object' && current !== null && 'code' in current) {
+      const code = (current as { code: unknown }).code;
+      // SQLSTATE is five characters; ignore Node's string error codes.
+      if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+    }
+    current = (current as { cause?: unknown })?.cause;
   }
   return undefined;
 }

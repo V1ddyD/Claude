@@ -23,7 +23,7 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**M2 — Catalogue and pricing, complete.** Built and verified so far:
+**M3 — The walking skeleton, complete.** Built and verified so far:
 
 - Schema applied and migrated (47 tables, 44 tenant-scoped)
 - Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
@@ -35,8 +35,20 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 - A pricing engine where every price is computed and invalid builds are refused with
   the valid alternatives attached
 - An inventory state machine driven by a transition table, with optimistic concurrency
+- An AI tool layer where the model cannot name a tenant, a customer or a query — and
+  where every result passes through a hand-written projection before it sees it
+- Test drive booking in one transaction, with double booking prevented by Postgres
+- Lead extraction with per-field confidence, scored by configurable rules rather than
+  by the model
+- A Dealer Portal showing the lead, its evidence, the appointment, the ticket and the
+  whole conversation
 
-87 tests pass against a real PostgreSQL 16. Next: **M3 — the walking skeleton.**
+162 tests pass against a real PostgreSQL 16, including **the spec §44 demonstration
+scenario end to end**. Next: **M4 — the customer website and the rest of the portal.**
+
+> **Not yet exercised:** no `ANTHROPIC_API_KEY` has been configured, so the model client
+> is written but has never run. Everything around it is tested with a scripted model.
+> See `docs/06-implementation-log.md` -> M3.
 
 ## Quick start
 

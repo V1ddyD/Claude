@@ -99,6 +99,28 @@ export async function seedInventory(sql: Sql, tenantId: string): Promise<number>
     }
   }
 
+  // A dealership can demonstrate everything it sells, so guarantee at least one
+  // demonstrator per model. Leaving it to the random status mix meant some
+  // models had none, and a customer asking to drive one was refused outright.
+  await sql`
+    UPDATE inventory_units u SET is_demo_vehicle = true, condition = 'demo', mileage_km = 1200
+    WHERE u.tenant_id = ${tenantId}
+      AND u.id IN (
+        SELECT DISTINCT ON (m.id) u2.id
+        FROM inventory_units u2
+          JOIN model_configurations mc ON mc.id = u2.model_configuration_id
+          JOIN vehicle_models m ON m.id = mc.model_id
+        WHERE u2.tenant_id = ${tenantId}
+          AND u2.status = 'available'
+          AND NOT EXISTS (
+            SELECT 1 FROM inventory_units d
+              JOIN model_configurations dmc ON dmc.id = d.model_configuration_id
+            WHERE dmc.model_id = m.id AND d.is_demo_vehicle
+          )
+        ORDER BY m.id, u2.stock_number
+      )
+  `;
+
   // Every demonstrator becomes a bookable resource. A test drive consumes the
   // car as well as the salesperson, so the car must exist as a resource for the
   // exclusion constraint to protect it.

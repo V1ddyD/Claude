@@ -41,7 +41,7 @@ double-charged when standard on its trim; no build prices below its configuratio
 
 ---
 
-## M3 — The walking skeleton ⭐ *(the change to §59)* — next
+## M3 — The walking skeleton ✅ *(the change to §59)* — next
 
 Deliberately unpolished, deliberately end to end:
 
@@ -58,7 +58,7 @@ website was built on assumptions about it.
 
 ---
 
-## M4 — Depth *(spec phases 6–11)*
+## M4 — Depth *(spec phases 6–11)* — next
 
 Now the surfaces, each against a working spine.
 

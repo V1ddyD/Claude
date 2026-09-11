@@ -195,8 +195,109 @@ rather than only refuse.
 
 ---
 
-## M3 — The walking skeleton — next
+## M3 — The walking skeleton ✅
 
-The thin end-to-end slice: chat endpoint, a handful of read tools, one write tool,
-lead extraction and scoring, and the lead visible in the portal. Exit: the §44
-demonstration scenario runs start to finish.
+The reordering proposed in `docs/04-spec-review.md` §17: prove the AI -> lead -> portal
+spine before building the surfaces on top of it.
+
+### Built
+
+| Area | Where |
+|---|---|
+| Tool registry, invariants enforced at startup | `src/server/ai/tools/registry.ts` |
+| Eight read tools + one write tool | `src/server/ai/tools/read/`, `write/` |
+| Projection layer (the leak boundary) | `src/server/ai/tools/projections/` |
+| Model client, behind an interface | `src/server/ai/client.ts` |
+| Conversation loop (Pass A) | `src/server/ai/conversation.ts` |
+| Extraction and scoring (Pass B) | `src/server/ai/extraction.ts` |
+| Lead signals schema + rule engine | `src/server/services/scoring/` |
+| Lead lifecycle | `src/server/services/leads/` |
+| Slot computation and booking | `src/server/services/booking/` |
+| Ticket numbering | `src/server/services/tickets/numbering.ts` |
+| Visitor identity | `src/server/services/visitors.ts` |
+| Job queue and worker | `src/server/jobs/` |
+| Chat and cron endpoints | `src/app/api/chat/`, `api/cron/worker/` |
+| Leads list and detail | `src/app/(portal)/portal/(dashboard)/leads/` |
+
+### Verified
+
+162 tests, up from 87. The exit criterion — spec §44 end to end — passes: a customer
+describes an SUV around $50,000, asks what engines the S5 has, picks the 2.0 Turbo AWD in
+Premium, is quoted **$58,900** computed from the catalogue, books a test drive, and a
+salesperson opening the portal sees the customer, the exact configuration, the budget,
+the timeframe, the trade-in, the appointment, the ticket number and the whole
+conversation — priority **HIGH**, with a rationale built from the rules that fired.
+
+Also asserted: the model may not name a tenant or a customer (identity is never a tool
+parameter); no tool exposes a query surface; every write tool declares idempotency and a
+retried booking returns the first result; one write per customer message; the tool loop
+is bounded; a failed tool leaves nothing behind; internal fields never enter the model's
+context; the assistant degrades honestly when the model is unavailable; extraction
+discards output that does not validate rather than coercing it; and the three §11 anchor
+conversations score LOW, MEDIUM and HIGH.
+
+### Four bugs the tests found
+
+1. **A failed write tool left partial records committed.** The conversation shares one
+   transaction and `dispatch` catches tool errors rather than throwing, so a booking that
+   failed after creating the customer and lead left both behind — a lead with no
+   appointment, exactly what spec §33 forbids. Each tool now runs inside a **savepoint**;
+   a failure rolls back its writes while the conversation survives. Regression test in
+   `tests/integration/conversation.test.ts`.
+
+2. **Constraint violations were invisible.** `pgErrorCode` read `code` off the thrown
+   error, but the query builder wraps the driver's error — so the exclusion violation was
+   never recognised and a customer losing a race for a slot would have seen a raw
+   database error instead of "that time has just gone". It now walks the `cause` chain.
+
+3. **`orderBy` slipped past the tool-input guard.** The check lowercased the field name
+   and compared it against a list containing `orderBy`, so it never matched. Both sides
+   are lowercased now. The guard had a hole in exactly the field most likely to be added.
+
+4. **Scoring mis-weighted two real cases.** Naming a model scored nothing, so the spec's
+   MEDIUM example came out LOW; and both test-drive rules fired together, double-counting
+   one fact and saying it twice in the rationale. Added a `model_identified` rule and rule
+   **supersession**, so a specific rule replaces the general one it covers.
+
+Plus two of my own test bugs worth noting, because both looked like product failures:
+a booking window 16 days out (beyond the dealership's 14-day horizon) and a concurrency
+case that used a transition the state machine forbids anyway.
+
+### Two things building it changed
+
+1. **Nothing created the anonymous visitor.** A conversation references a visitor row and
+   the foreign key refused — correctly. The central flow is a stranger opening the chat,
+   so there has to be something to attach a conversation to before anyone gives a name.
+   `src/server/services/visitors.ts` now mints one, and treats a cookie naming an unknown
+   visitor as untrusted rather than creating that id.
+
+2. **The seed did not guarantee a demonstrator per model.** Demo cars were assigned by the
+   random status mix, so some models had none and a customer asking to drive one was
+   refused outright. A dealership can demonstrate everything it sells; the seed now
+   guarantees one per model.
+
+### What is NOT verified
+
+**No live model call has been made.** No `ANTHROPIC_API_KEY` is configured in this
+environment, so the Anthropic client is written against the current API (`claude-opus-5`,
+adaptive thinking, `output_config.effort`, prompt-cached system prefix) but **has never
+run**. Everything around it — dispatch, grounding, persistence, idempotency, savepoints,
+extraction, scoring, the portal — is exercised by a scripted model, which is the right
+way to test our behaviour rather than a model's phrasing. Before a demo: set the key and
+walk the §44 conversation by hand. Expect prompt iteration; expect nothing structural to
+move.
+
+### Deliberately not built
+
+- **The customer-facing chat UI.** The endpoint works and is tested; the interface is M4,
+  with the rest of the site.
+- **Email delivery.** Messages are queued in the outbox with the right status; the Resend
+  provider and its webhooks are M4.
+- **Follow-up rules, assignment, status transitions from the portal.** M5.
+
+---
+
+## M4 — Depth — next
+
+The customer website, the configurator, the chat interface, the full tool set, email
+delivery, and the rest of the Dealer Portal — each against a spine that already works.

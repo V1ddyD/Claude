@@ -22,7 +22,7 @@ type NavItem =
 
 const NAV: NavItem[] = [
   { label: 'Dashboard', permission: 'customer.read', href: '/portal' },
-  { label: 'Leads', permission: 'lead.read.assigned', arrives: 'M3' },
+  { label: 'Leads', permission: 'lead.read.assigned', href: '/portal/leads' },
   { label: 'Appointments', permission: 'appointment.read', arrives: 'M4' },
   { label: 'Tickets', permission: 'ticket.sales.read', arrives: 'M4' },
   { label: 'Inventory', permission: 'inventory.read', arrives: 'M2' },

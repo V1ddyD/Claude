@@ -1,5 +1,8 @@
-import { requireStaff } from '@/server/auth/require-staff';
+import Link from 'next/link';
+import { withStaff } from '@/server/auth/require-staff';
+import { countByPriority } from '@/server/db/repositories/leads';
 
+export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Dashboard' };
 
 /**
@@ -10,17 +13,17 @@ export const metadata = { title: 'Dashboard' };
  * fabricated counts now would make the portal look finished while telling
  * staff nothing true.
  */
-const PANELS = [
-  { title: 'New leads', arrives: 'M3' },
-  { title: 'High priority', arrives: 'M3' },
-  { title: 'Unassigned', arrives: 'M3' },
+const PENDING = [
   { title: "Today's appointments", arrives: 'M4' },
   { title: 'Open tickets', arrives: 'M4' },
   { title: 'Follow-ups due', arrives: 'M5' },
 ];
 
 export default async function DashboardPage() {
-  const staff = await requireStaff('customer.read');
+  const { counts, staff } = await withStaff('lead.read.assigned', async (db, staff) => ({
+    counts: await countByPriority(db, staff),
+    staff,
+  }));
 
   return (
     <>
@@ -34,7 +37,25 @@ export default async function DashboardPage() {
       </div>
 
       <div className="mt-8 grid gap-px overflow-hidden rounded border border-ink-100 bg-ink-100 sm:grid-cols-2 lg:grid-cols-3">
-        {PANELS.map((panel) => (
+        <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
+          <p className="text-xs uppercase tracking-wider text-ink-500">High priority</p>
+          <p className="mt-3 text-2xl font-medium tabular-nums text-[color:var(--color-signal-high)]">
+            {counts.high}
+          </p>
+          <p className="mt-1 text-xs text-ink-500">Open leads needing a call</p>
+        </Link>
+        <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
+          <p className="text-xs uppercase tracking-wider text-ink-500">Medium priority</p>
+          <p className="mt-3 text-2xl font-medium tabular-nums text-ink-900">{counts.medium}</p>
+          <p className="mt-1 text-xs text-ink-500">Worth following up</p>
+        </Link>
+        <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
+          <p className="text-xs uppercase tracking-wider text-ink-500">Low priority</p>
+          <p className="mt-3 text-2xl font-medium tabular-nums text-ink-500">{counts.low}</p>
+          <p className="mt-1 text-xs text-ink-500">Nurture</p>
+        </Link>
+
+        {PENDING.map((panel) => (
           <div key={panel.title} className="bg-white p-5">
             <p className="text-xs uppercase tracking-wider text-ink-500">{panel.title}</p>
             <p className="mt-3 text-2xl font-medium tabular-nums text-ink-300">—</p>
@@ -44,10 +65,9 @@ export default async function DashboardPage() {
       </div>
 
       <p className="mt-8 max-w-2xl text-sm leading-relaxed text-ink-500">
-        The foundation is complete: the schema is applied, tenant isolation is enforced by
-        the database and verified by a non-skippable test suite, authorization is
-        permission-based, and every change is audited. These panels stay empty until the
-        subsystems behind them are real.
+        Lead figures are live. The remaining panels stay empty until the subsystems behind
+        them exist — a fabricated count would make this page look finished while telling
+        you nothing true.
       </p>
     </>
   );
