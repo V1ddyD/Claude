@@ -1,8 +1,12 @@
 import {
-  ASKS, CANNOT_HELP, askedFor, remember,
+  ASKS, CANNOT_HELP, remember,
   type ConversationState, type Memory, type Step,
 } from './state';
-import { saidMatchesSlot, unofferedColour } from './understand';
+import { saidMatchesSlot } from './understand';
+import {
+  resolveTrim, resolvePowertrain, resolveColour,
+  type ColourRow, type PowertrainRow, type TrimRow,
+} from './resolve';
 import { describe, sentenceList } from './compose';
 import { readDigest, localDate, type Digest } from './digest';
 
@@ -36,10 +40,13 @@ const t = (name: string, input: Record<string, unknown>): ToolCall => ({ name, i
 
 export function decide(system: string, state: ConversationState, now: Date): Decision {
   const digest = readDigest(system);
-  const memory = remember(state.exchanges);
+  // The vocabulary is this tenant's own range, read from the catalogue digest
+  // it was given. Add a model to the catalogue and it is understood on the
+  // next request; there is no list of model names in this code (spec §1).
+  const memory = remember(state.exchanges, { models: digest.models });
 
   return state.steps.length > 0
-    ? continueTurn(memory, state.steps)
+    ? continueTurn(memory, state.steps, digest)
     : openTurn(memory, digest, now);
 }
 
@@ -114,6 +121,9 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
     case 'ticket':
       return ticketTurn(m);
 
+    case 'service':
+      return serviceTurn(m);
+
     default:
       return say(cannotHelp());
   }
@@ -153,12 +163,13 @@ function catalogueTurn(m: Memory, digest: Digest): Decision {
         }),
       );
     case 'stock':
+      // Trims and colours are resolved against the catalogue before the stock
+      // query, so "a black Premium" filters on real codes. Filtering the
+      // results instead would answer "we have none" whenever the match sat
+      // outside the handful of rows the tool returns.
       return call(
-        t('checkInventory', {
-          modelSlug: slug,
-          ...(m.trimCode ? { trimCode: m.trimCode } : {}),
-          ...(m.colourCode ? { exteriorColourCode: m.colourCode } : {}),
-        }),
+        t('getVehicleTrims', { modelSlug: slug }),
+        t('getVehicleColours', { modelSlug: slug, kind: 'exterior' }),
       );
     case 'options':
     case 'features':
@@ -170,14 +181,23 @@ function catalogueTurn(m: Memory, digest: Digest): Decision {
         t('getVehicleTrims', { modelSlug: slug }),
       );
     case 'price':
-      return m.trimCode || m.powertrainHint
-        ? call(
-            t('getVehiclePowertrains', { modelSlug: slug }),
-            t('getVehicleTrims', { modelSlug: slug }),
-          )
-        : call(t('getVehicle', { modelSlug: slug }));
+      // Always both lookups. Which trim and engine the customer named can only
+      // be known by comparing their words against what this model is actually
+      // built in, and a price for an unnamed build is the cheapest trim's —
+      // which is a figure the trim tool returns rather than one to assume.
+      return call(
+        t('getVehiclePowertrains', { modelSlug: slug }),
+        t('getVehicleTrims', { modelSlug: slug }),
+      );
     default:
-      return call(t('getVehicle', { modelSlug: slug }));
+      // The overview, plus the lists a stated configuration is resolved
+      // against. "I want the S5 Premium with the 2.0 Turbo" is a build, and
+      // the useful answer to it is a price rather than a brochure.
+      return call(
+        t('getVehicle', { modelSlug: slug }),
+        t('getVehiclePowertrains', { modelSlug: slug }),
+        t('getVehicleTrims', { modelSlug: slug }),
+      );
   }
 }
 
@@ -202,13 +222,59 @@ function slotsCall(m: Memory, digest: Digest, now: Date): ToolCall {
 /* Continuing a turn, once tools have returned                                */
 /* -------------------------------------------------------------------------- */
 
-function continueTurn(m: Memory, steps: Step[]): Decision {
+function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
   // A failed tool ends the turn. Carrying on would mean pricing a build from a
   // list that never arrived.
   const failed = steps.find((step) => step.isError);
   if (failed) return say(describe(failed));
 
   const done = new Set(steps.map((step) => step.name));
+
+  // A budget search that found nothing. Saying so is necessary but not
+  // sufficient: the spec asks for the closest thing we do build, so the same
+  // search runs again without the budget rather than leaving the customer to
+  // guess what they could have (spec §5).
+  if (
+    m.intent === 'search_vehicles' &&
+    m.budgetCents &&
+    // Only worth widening when something other than the price was asked for.
+    // Dropping the budget from a budget-only search returns the whole range,
+    // which is not "the closest we build" — it is a change of subject.
+    (m.bodyStyle || m.latest.electric || m.latest.awd) &&
+    steps.length === 1 &&
+    steps[0]!.name === 'searchVehicles' &&
+    foundNothing(steps[0]!)
+  ) {
+    const wider = { ...searchInput(m) };
+    delete wider.maxPriceCents;
+    return call(t('searchVehicles', wider));
+  }
+
+  // Stock: the trim and colour lists came back, so the customer's words can be
+  // turned into real codes and the query can filter on them.
+  if (m.intent === 'stock' && done.has('getVehicleTrims') && !done.has('checkInventory')) {
+    if (!m.modelSlug) return say(compose(m, steps));
+
+    const trim = resolveTrim(m.words, rowsOf<TrimRow>(steps, 'getVehicleTrims', 'trims'));
+    const colour = resolveColour(m.colourWords, rowsOf<ColourRow>(steps, 'getVehicleColours', 'colours'));
+
+    // A colour they named that this model is not painted in. Checking stock for
+    // it would report "none available", which is true and misleading.
+    if (m.colourWords.length > 0 && !colour) {
+      return say(
+        `We do not offer ${aColour(m.colourWords[0]!)} on that one. ` +
+          `${describe(steps.find((step) => step.name === 'getVehicleColours')!)}`,
+      );
+    }
+
+    return call(
+      t('checkInventory', {
+        modelSlug: m.modelSlug,
+        ...(trim ? { trimCode: trim.code } : {}),
+        ...(colour ? { exteriorColourCode: colour.code } : {}),
+      }),
+    );
+  }
 
   if (
     done.has('getVehiclePowertrains') &&
@@ -237,11 +303,39 @@ function continueTurn(m: Memory, steps: Step[]): Decision {
       };
       if (m.intent === 'options') return call(t('getVehicleOptions', input));
       if (m.intent === 'features') return call(t('getVehicleFeatures', input));
-      if (m.intent === 'price') return call(t('calculateVehiclePrice', input));
+      // A build is only priced when the customer actually named part of it.
+      // "How much is the S5?" is asking where the range starts, and the trim
+      // list already carries that figure.
+      if (build.named && (m.intent === 'price' || m.intent === 'vehicle_overview')) {
+        return call(t('calculateVehiclePrice', input));
+      }
+
+      if (m.intent === 'price') {
+        // Where the range starts, from the figure the trim tool returned —
+        // not from the digest, and not by picking the smallest number seen.
+        const trims = rowsOf<TrimRow & { priceFrom?: { formatted?: string } }>(
+          steps, 'getVehicleTrims', 'trims',
+        );
+        const from = trims[0]?.priceFrom?.formatted;
+        const name = digest.models.find((model) => model.slug === m.modelSlug)?.name ?? 'It';
+        return say(
+          [
+            from ? `The ${name} starts at ${from}.` : '',
+            describe(steps.find((step) => step.name === 'getVehicleTrims')!),
+            'Tell me which trim and engine you are interested in and I will price it exactly.',
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+        );
+      }
     }
   }
 
-  if (m.intent === 'finance' && done.has('getVehicle')) {
+  // Guarded on the write having not already happened. Without that the branch
+  // re-issues it every iteration: idempotency replays the first result rather
+  // than double-booking, but the turn never produces a reply and the customer
+  // is told nothing happened when it did.
+  if (m.intent === 'finance' && done.has('getVehicle') && !done.has('createFinancingRequest')) {
     const cents = startingPriceCents(steps);
     if (cents && applying(m) && m.name && m.email && m.consent) {
       return call(
@@ -268,6 +362,7 @@ function continueTurn(m: Memory, steps: Step[]): Decision {
 
 /** Tools whose result IS the answer; anything before them was groundwork. */
 const ANSWERS = new Set([
+  'getVehicle',
   'calculateVehiclePrice', 'getVehicleOptions', 'getVehicleFeatures', 'calculateFinanceEstimate',
   'createTestDrive', 'cancelTestDrive', 'createCallbackRequest', 'createTradeInRequest',
   'createFinancingRequest', 'createSupportTicket', 'requestHumanHandoff',
@@ -285,15 +380,34 @@ function compose(m: Memory, steps: Step[]): Decision['text'] {
   return [preamble(m, last), body || cannotHelp(), follow].filter(Boolean).join('\n\n');
 }
 
+function foundNothing(step: Step): boolean {
+  const result = (step.result ?? {}) as { count?: unknown };
+  return result.count === 0;
+}
+
 /** Said before the answer, where the answer alone would not address the question. */
 function preamble(m: Memory, last: Step): string {
-  if (last.name === 'getVehicleColours' && !last.isError) {
-    const asked = unofferedColour(m.said.at(-1) ?? '');
-    // Nine colours, none of them theirs. Saying so is the answer; the list is
-    // the useful part that follows it.
-    if (asked) return `We do not offer a ${asked} on that one. Here is what we do:`;
+  if (last.name === 'searchVehicles' && m.budgetCents && !foundNothing(last)) {
+    const searched = (last.input.maxPriceCents ?? null) === null;
+    // The second, wider search. The figure comes from what they said, and the
+    // prices below it come from the catalogue.
+    if (searched) return 'Nothing in the range comes in under that. The closest we build:';
+  }
+
+  if (last.name === 'getVehicleColours' && !last.isError && m.colourWords.length > 0) {
+    const offered = resolveColour(m.colourWords, rowsOf<ColourRow>([last], 'getVehicleColours', 'colours'));
+    // A list of nine, none of them theirs. Saying so is the answer; the list is
+    // the useful part that follows it. Decided by the palette, not by a
+    // hardcoded idea of which colours a dealership sells.
+    if (!offered) {
+      return `We do not offer ${aColour(m.colourWords[0]!)} on that one. Here is what we do:`;
+    }
   }
   return '';
+}
+
+function aColour(word: string): string {
+  return /^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`;
 }
 
 /** One next step, offered only where there is an obvious one. */
@@ -494,6 +608,33 @@ function handoffTurn(m: Memory): Decision {
   );
 }
 
+/**
+ * Service.
+ *
+ * There is no service booking system here and no service price list, so
+ * inventing either would be the worst kind of convenient. What exists is the
+ * service department's hours and a ticket the service team will answer, and
+ * that is what this offers (spec §21).
+ */
+function serviceTurn(m: Memory): Decision {
+  if (/\b(open|opening hours|what time|when are you)\b/i.test(m.said.at(-1) ?? '')) {
+    return call(t('getDealershipHours', { department: 'service' }));
+  }
+
+  const missing = askContact(m, 'Our service team can help with that.');
+  if (missing) return missing;
+
+  const question = m.said.filter((said) => said.trim().length >= 12).at(0) ?? 'Service enquiry.';
+  return call(
+    t('createSupportTicket', {
+      ...contactInput(m),
+      type: 'service',
+      subject: question.slice(0, 140),
+      details: question.slice(0, 1500),
+    }),
+  );
+}
+
 function ticketTurn(m: Memory): Decision {
   const missing = askContact(m, 'I will pass it to the team.');
   if (missing) return missing;
@@ -521,10 +662,7 @@ function financeRequestTurn(m: Memory, digest: Digest): Decision {
 
 /** True when the customer accepted the offer of a specialist, or asked outright. */
 function applying(m: Memory): boolean {
-  if (askedFor(m.asked, 'finance') && m.latest.affirmative) return true;
-  return /\b(apply|application|pre.?approv|proceed with financ|sort out financ)/i.test(
-    m.said.at(-1) ?? '',
-  );
+  return m.financeApplication;
 }
 
 function reasonFrom(m: Memory, fallback: string): string {
@@ -617,16 +755,6 @@ function range(digest: Digest): string {
 /* Resolving a build from what the tools returned                              */
 /* -------------------------------------------------------------------------- */
 
-interface PowertrainRow {
-  code: string;
-  name: string;
-  type: string;
-  offeredWithTrims: string[];
-}
-interface TrimRow {
-  code: string;
-  name: string;
-}
 
 /**
  * A model, trim and powertrain that are actually offered together.
@@ -637,7 +765,8 @@ interface TrimRow {
  * impossible combination.
  */
 type Build =
-  | { kind: 'build'; powertrainCode: string; trimCode: string }
+  /** `named` is true when the customer identified part of the build themselves. */
+  | { kind: 'build'; powertrainCode: string; trimCode: string; named: boolean }
   | { kind: 'not-offered'; trim: TrimRow; powertrain: PowertrainRow; alternatives: string[] }
   | { kind: 'unknown' };
 
@@ -646,8 +775,10 @@ function resolveBuild(m: Memory, steps: Step[]): Build {
   const trims = rowsOf<TrimRow>(steps, 'getVehicleTrims', 'trims');
   if (powertrains.length === 0 || trims.length === 0) return { kind: 'unknown' };
 
-  let trim = m.trimCode ? trims.find((row) => row.code === m.trimCode) : undefined;
-  let powertrain = m.powertrainHint ? matchPowertrain(powertrains, m.powertrainHint) : undefined;
+  const namedTrim = resolveTrim(m.words, trims);
+  const namedPowertrain = resolvePowertrain(m.words, powertrains);
+  let trim = namedTrim;
+  let powertrain = namedPowertrain;
 
   // Both named, and not built together. This is told, not fixed.
   //
@@ -678,14 +809,12 @@ function resolveBuild(m: Memory, steps: Step[]): Build {
     trim = trims.find((row) => powertrain!.offeredWithTrims.includes(row.code)) ?? trim;
   }
 
-  return { kind: 'build', powertrainCode: powertrain.code, trimCode: trim.code };
-}
-
-function matchPowertrain(rows: PowertrainRow[], hint: string): PowertrainRow | undefined {
-  if (hint === 'hybrid') return rows.find((row) => row.type === 'hybrid' || row.type === 'phev');
-  return rows.find(
-    (row) => row.code.toLowerCase().startsWith(hint) || row.name.toLowerCase().includes(hint),
-  );
+  return {
+    kind: 'build',
+    powertrainCode: powertrain.code,
+    trimCode: trim.code,
+    named: Boolean(namedTrim ?? namedPowertrain),
+  };
 }
 
 function rowsOf<T>(steps: Step[], toolName: string, key: string): T[] {

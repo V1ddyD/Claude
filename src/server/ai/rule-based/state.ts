@@ -1,7 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   understand, nameFromReply, findConfirmationCode, findTradeInVehicle, chosenFromOffer,
-  type Intent, type TradeInVehicle,
+  colourWords,
+  type Intent, type Timeframe, type TradeInVehicle, type Vocabulary,
 } from './understand';
 
 /**
@@ -112,9 +113,15 @@ export interface Memory {
   asked: string;
   modelSlug?: string;
   comparisonSlugs: string[];
-  trimCode?: string;
-  powertrainHint?: string;
-  colourCode?: string;
+  /**
+   * Content words from the whole conversation, newest first.
+   *
+   * Resolved against real trims, colours and powertrains when the tools come
+   * back. Nothing here is assumed to name anything until the catalogue agrees
+   * that it does.
+   */
+  words: string[];
+  colourWords: string[];
   budgetCents?: number;
   bodyStyle?: ReturnType<typeof understand>['bodyStyle'];
   electric?: boolean;
@@ -124,7 +131,21 @@ export interface Memory {
   phone?: string;
   /** Explicit. Never inferred from the customer having given an email address. */
   consent: boolean;
+  /**
+   * They accepted the offer of a finance specialist.
+   *
+   * Remembered rather than re-read from the last message, because the messages
+   * that follow it are a name, an email and a yes to being contacted — none of
+   * which mention financing, and all of which are part of the same request.
+   */
+  financeApplication: boolean;
   termMonths?: number;
+  timeframe?: Timeframe;
+  financeInterest?: boolean;
+  tradeInInterest?: boolean;
+  negotiating?: boolean;
+  justBrowsing?: boolean;
+  seats?: number;
   confirmationCode?: string;
   /** The exact time the customer picked, as it was worded when offered. */
   chosenSlotLabel?: string;
@@ -134,10 +155,12 @@ export interface Memory {
 }
 
 /** Intents that span several turns, so a bare "yes" still belongs to one. */
-const FLOWS: Intent[] = ['test_drive', 'cancel', 'callback', 'trade_in', 'human', 'finance'];
+const FLOWS: Intent[] = [
+  'test_drive', 'cancel', 'callback', 'trade_in', 'human', 'finance', 'service',
+];
 
-export function remember(exchanges: Exchange[]): Memory {
-  const latest = understand(exchanges.at(-1)?.said ?? '');
+export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory {
+  const latest = understand(exchanges.at(-1)?.said ?? '', vocabulary);
   const asked = exchanges.at(-1)?.asked ?? '';
 
   const memory: Memory = {
@@ -146,14 +169,17 @@ export function remember(exchanges: Exchange[]): Memory {
     said: exchanges.map((e) => e.said),
     asked,
     comparisonSlugs: [],
+    words: [],
+    colourWords: [],
     consent: false,
+    financeApplication: false,
     tradeIn: {},
   };
 
   const flows: Flow[] = [];
 
   for (const exchange of exchanges) {
-    const turn = understand(exchange.said);
+    const turn = understand(exchange.said, vocabulary);
     if (FLOWS.includes(turn.intent)) flows.push(turn.intent);
 
     // Accepting the offer to pass a question on is what starts a ticket.
@@ -175,10 +201,19 @@ export function remember(exchanges: Exchange[]): Memory {
       memory.comparisonSlugs = turn.modelSlugs;
       memory.modelSlug = turn.modelSlugs[0];
     }
-    if (turn.trimHint) memory.trimCode = turn.trimHint;
-    if (turn.powertrainHint) memory.powertrainHint = turn.powertrainHint;
-    if (turn.colourHint) memory.colourCode = turn.colourHint;
+    // Newest first, so a later "actually, the Sport" resolves ahead of an
+    // earlier "Premium" when both match a real trim.
+    memory.words = [...turn.words, ...memory.words];
+    const colours = colourWords(exchange.said);
+    if (colours.length > 0) memory.colourWords = [...colours, ...memory.colourWords];
+
     if (turn.budgetCents) memory.budgetCents = turn.budgetCents;
+    if (turn.timeframe) memory.timeframe = turn.timeframe;
+    if (turn.financeInterest) memory.financeInterest = true;
+    if (turn.tradeInInterest) memory.tradeInInterest = true;
+    if (turn.negotiating) memory.negotiating = true;
+    if (turn.justBrowsing) memory.justBrowsing = true;
+    if (turn.seats) memory.seats = turn.seats;
     if (turn.bodyStyle) memory.bodyStyle = turn.bodyStyle;
     if (turn.electric) memory.electric = true;
     if (turn.awd) memory.awd = true;
@@ -199,6 +234,11 @@ export function remember(exchanges: Exchange[]): Memory {
     if (!turn.name && askedFor(exchange.asked, 'contact')) {
       const offered = nameFromReply(exchange.said);
       if (offered) memory.name = offered;
+    }
+
+    if (askedFor(exchange.asked, 'finance') && turn.affirmative) memory.financeApplication = true;
+    if (/\b(apply|application|pre.?approv|proceed with financ|sort out financ)\b/i.test(exchange.said)) {
+      memory.financeApplication = true;
     }
 
     // Consent is a yes to a direct question about being contacted, and nothing

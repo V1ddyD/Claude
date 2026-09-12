@@ -709,6 +709,95 @@ than a confident guess.
 
 ---
 
+## M8 — The scripted AI layer, properly ✅
+
+M7 made the assistant work without a key. This makes it a product rather than a
+demonstration: the implementation is selectable, it contains no dealership's catalogue,
+and what a customer says reaches the lead record through the existing scoring.
+
+### Built
+
+**A provider switch** (`AI_PROVIDER`). `scripted`, `anthropic`, or `auto` — the model
+when a credential exists, the scripted assistant when none does. `features.aiProvider`
+resolves it in one place; nothing else reads the variable. `AI_PROVIDER=anthropic`
+without a credential now fails at boot with a message that says what to do, rather than
+at the first customer message.
+
+**Entity recognition with no catalogue in it.** The hardcoded lists of ten model codes,
+twelve trims and fourteen colours are gone. Models come from the tenant's own range via
+the catalogue digest, matched on slug, full name and short name, singular or plural.
+Trims, colours and powertrains are captured as the words the customer used and resolved
+against the rows the tools returned (`rule-based/resolve.ts`), scored by how much of a
+row's name they used. A word that names nothing is dropped. The one remaining list is
+English colour words, used only to notice that a colour was mentioned.
+
+**Deterministic extraction** (`rule-based/signals.ts`). Pass B no longer skips. It
+produces the same `LeadSignals` contract, validated by the same schema, applied through
+the same `applySignals`, scored by the same rule engine. Budget, purchase timeframe,
+finance interest, trade-in interest, negotiation, browsing, test-drive intent and the
+chosen slot all now reach the portal. Configuration codes are resolved against the
+catalogue, so a trim the dealership does not sell records as nothing.
+
+**A second tenant with a catalogue of its own.** Northwind now sells a Harrier in
+Drifter and Navigator trim, in Harbour Grey and Spruce Green. Not decoration: it is the
+only way to demonstrate isolation rather than assert it — Northwind's assistant does not
+recognise "S5" at all, because "S5" is not in Northwind's vocabulary.
+
+**A service path.** Hours from the service department, and a service ticket for anything
+needing a person. No invented service prices, no invented availability.
+
+### Verified
+
+The suite went from 309 to 346. New:
+
+- `scripted-coverage.test.ts` — enumerates every published model in the database and asks
+  the same seven questions of each: identify by name, identify by slug, powertrains,
+  trims, price a named trim to the cent against `model_configurations`, stock against
+  `inventory_units`, and colours excluding every colour the model is not painted in. A
+  model added tomorrow is covered tomorrow with no edit.
+- `scripted-tenant-isolation.test.ts` — the other dealership's vehicle, inventory,
+  customer, conversation and settings, each attempted through the assistant. Includes
+  one person with one email address at both dealerships producing two separate customer
+  records.
+- `scripted-leads.test.ts` — high, medium and low priority leads end to end through the
+  real rules; a configuration stated but never priced; gradual information across seven
+  messages landing on one lead; and no priority, score or identifier in anything the
+  customer was shown.
+- `scripted-scenarios.test.ts` — budget searches in four phrasings, body-style and
+  powertrain searches, comparison, service hours, a service ticket, a time that was never
+  offered, two customers competing for one slot, a financing enquiry, and the provider
+  switch itself.
+
+### Seven more bugs, found by writing the tests
+
+1. **A budget beat a named car.** "I want the S5 Premium and I have $55,000" searched the
+   range under $55,000 instead of pricing the car they named. A budget is a search
+   criterion only when they have not said which car.
+2. **"Callback" did not route to a callback.** The word customers actually use was not in
+   the pattern; only "call me" was.
+3. **A stated configuration was never recorded.** Booking a test drive for an "S5
+   Premium" priced nothing, so no tool validated the trim and the lead lost it. Extraction
+   now offers the words to the catalogue directly.
+4. **The financing branch looped.** It re-issued the write on every iteration because it
+   had no "already done" guard: idempotency replayed the first result rather than
+   double-charging, but the turn produced no reply and the customer was told nothing had
+   happened when it had.
+5. **Accepting a finance specialist was forgotten one turn later.** The acceptance was
+   re-read from the newest message, which by then was a name, an email and a yes to being
+   contacted — none of which mention financing.
+6. **"What SUVs do you have around 50k?"** was read as a stock check and asked which
+   model, when it is a search.
+7. **"Please contact me" was read as "where are you?"** — the word "contact" had been
+   added to the location pattern and swallowed a consent reply.
+
+### Deliberately not built
+
+No Anthropic call. No tier or subscription logic (§24). No fuzzy matching or synonym
+expansion — a question it does not recognise gets an honest answer and a route to a
+person, which is the failure the model is instructed to make too.
+
+---
+
 ## What remains
 
 **One thing needs you, and one thing needs a decision.**

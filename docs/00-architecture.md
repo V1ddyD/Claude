@@ -217,6 +217,13 @@ POST /api/chat  (Node runtime, streaming)
 
 ### Two assistants behind one interface
 
+`AI_PROVIDER` selects one — `scripted`, `anthropic`, or `auto` (the model when a
+credential exists, the scripted assistant when none does). `features.aiProvider` resolves
+it in one place; nothing else reads the variable or checks for a key, so there is no
+second opinion about which assistant is running. Selecting `scripted` never requires a
+credential; selecting `anthropic` without one fails at boot rather than in front of a
+customer.
+
 `ModelClient` has two implementations, and nothing downstream of `modelClient()` knows
 which one it has:
 
@@ -240,6 +247,42 @@ can be exercised end to end deterministically, which a model cannot be asked to 
 What it is not: an understanding of language. It matches patterns. A question phrased
 unusually falls through to the honest "I do not have that confirmed" and a ticket, which
 is the right failure but a visibly plainer experience than the model gives.
+
+#### It contains no catalogue
+
+This is what separates it from a demo script. There is no list of model names, trim
+names, colour names or engine codes anywhere in `src/server/ai/rule-based/`:
+
+- **Models** come from the catalogue digest the tenant's own range produced, matched on
+  slug, full name and the name after the brand — so "s5", "Sinclair S5", "the S5" and
+  "S5s" are one car, and a model added to the catalogue is understood on the next
+  request.
+- **Trims, colours and powertrains** are never guessed at. The customer's words are
+  captured loosely and resolved strictly (`resolve.ts`) against the rows a tool actually
+  returned, scored by how much of a row's name they used. A word that names nothing
+  resolves to nothing and is dropped.
+- **Colour words** are the one language-level list — "green", "burgundy" — used only to
+  notice that a colour was mentioned. Which colours exist, what they are called and what
+  they cost all come from the catalogue.
+
+The consequence is that a second dealership with an entirely different range works
+without a line of change, and the test suite proves it: `scripted-coverage.test.ts`
+enumerates whatever is in the database and asks the same questions of each model, and
+`scripted-tenant-isolation.test.ts` shows the second tenant's assistant does not
+recognise the first tenant's model names at all.
+
+#### Extraction without a model
+
+Pass B runs deterministically too (`rule-based/signals.ts`). It produces the same
+`LeadSignals` contract the model fills in, validated by the same schema, applied through
+the same `applySignals`, and scored by the same rule engine — the extract/score split is
+untouched (spec §11, §16). Confidence is the honest part: everything it records was
+either stated outright (0.95) or observed by the system (1.0), because it infers nothing.
+Configuration codes are resolved against the catalogue rather than trusted from the
+customer's wording, so a trim the dealership does not sell is recorded as nothing.
+
+What a scripted lead lacks is implication — a budget hinted at rather than stated, a
+timeframe read from tone. That is thinner, not wronger.
 
 ### Two passes, deliberately separate
 

@@ -211,12 +211,12 @@ describe('inventory', () => {
 describe('catalogue tenancy', () => {
   it('is invisible to another dealership', async () => {
     const rows = await asTenant(app, NORTHWIND_TENANT_ID, (tx) =>
-      tx<{ count: number }[]>`
-        SELECT count(*)::int AS count FROM vehicle_models
-      `,
+      tx<{ slug: string }[]>`SELECT slug FROM vehicle_models`,
     );
-    // Northwind has no catalogue of its own and must not see Sinclair's.
-    expect(rows[0]?.count).toBe(0);
+
+    // Northwind has a catalogue of its own now, which makes this the stronger
+    // assertion: it sees exactly its own range and no part of Sinclair's.
+    expect(rows.map((r) => r.slug)).toEqual(['harrier']);
   });
 
   it('is visible to its own dealership', async () => {

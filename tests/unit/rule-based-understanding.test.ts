@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   understand, nameFromReply, findConfirmationCode, findOrdinal,
-  findTradeInVehicle, saidMatchesSlot, chosenFromOffer, unofferedColour,
+  findTradeInVehicle, saidMatchesSlot, chosenFromOffer, colourWords,
 } from '../../src/server/ai/rule-based/understand';
 import { readConversation, remember, ASKS } from '../../src/server/ai/rule-based/state';
 import { decide } from '../../src/server/ai/rule-based/script';
@@ -14,6 +14,21 @@ import { decide } from '../../src/server/ai/rule-based/script';
  * or a consent check that accepts an email address as agreement, would both
  * look fine in a demo.
  */
+
+/**
+ * The vocabulary a tenant's catalogue would supply.
+ *
+ * Passed in rather than known: nothing in the classifier contains a Sinclair
+ * model name, which is what lets a different dealership's range work.
+ */
+const RANGE = {
+  models: [
+    { slug: 's3', name: 'Sinclair S3' },
+    { slug: 's5', name: 'Sinclair S5' },
+    { slug: 'x7', name: 'Sinclair X7' },
+    { slug: 'e5', name: 'Sinclair E5' },
+  ],
+};
 
 describe('classifying what was asked', () => {
   const cases: [string, string][] = [
@@ -42,12 +57,22 @@ describe('classifying what was asked', () => {
   ];
 
   it.each(cases)('%s -> %s', (text, intent) => {
-    expect(understand(text).intent).toBe(intent);
+    expect(understand(text, RANGE).intent).toBe(intent);
+  });
+
+  it('recognises a model by slug, by name and in the plural', () => {
+    expect(understand('tell me about the s5', RANGE).modelSlugs).toEqual(['s5']);
+    expect(understand('tell me about the Sinclair S5', RANGE).modelSlugs).toEqual(['s5']);
+    expect(understand('do you have any S5s?', RANGE).modelSlugs).toEqual(['s5']);
+    // And knows nothing without a catalogue to know it from.
+    expect(understand('tell me about the s5').modelSlugs).toEqual([]);
   });
 
   it('does not treat naming a car as a question it can answer', () => {
     // Honest ignorance beats an overview that answers something else.
-    expect(understand('Does the S5 tow a three horse trailer in winter?').intent).toBe('unknown');
+    expect(understand('Does the S5 tow a three horse trailer in winter?', RANGE).intent).toBe(
+      'unknown',
+    );
   });
 
   it('does not read a phone number as a budget', () => {
@@ -89,10 +114,11 @@ describe('reading details back', () => {
     expect(findOrdinal('the S5 please')).toBeUndefined();
   });
 
-  it('keeps a colour question about a colour we do not sell', () => {
-    expect(unofferedColour('in lime green')).toBe('green');
-    // One we do sell is not a complaint.
-    expect(unofferedColour('in Obsidian Black')).toBeUndefined();
+  it('picks out colour words for the catalogue to resolve', () => {
+    // Which of these the dealership actually sells is not decided here.
+    expect(colourWords('in lime green')).toEqual(['green', 'lime']);
+    expect(colourWords('in Obsidian Black')).toEqual(['black']);
+    expect(colourWords('with the technology package')).toEqual([]);
   });
 
   it('reads a model name that carries digits or two words', () => {
@@ -202,7 +228,10 @@ describe('what it will act on', () => {
 
   it('leaves a real model alone when another token sits beside it', () => {
     const decision = turn({ role: 'user', content: 'Do you have the S5 in stock by Q3?' });
-    expect(decision.tools.map((tool) => tool.name)).toEqual(['checkInventory']);
+    // Trims and colours are resolved first so the stock query can filter on
+    // real codes; what matters here is that it did not deny making a Q3.
+    expect(decision.tools.map((tool) => tool.name)).toContain('getVehicleTrims');
+    expect(decision.text).toBe('');
   });
 
   it('quotes no price the digest happened to carry', () => {

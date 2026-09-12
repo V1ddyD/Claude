@@ -1,6 +1,8 @@
 import type { Sql } from 'postgres';
 import { DEFAULT_SCORING_RULES } from '../../src/server/services/scoring/rules';
 import { DEFAULT_FOLLOW_UP_RULES } from '../../src/server/services/follow-ups/rules';
+import { NORTHWIND_CATALOGUE } from './catalogue/northwind';
+import { writeModel } from './catalogue-writer';
 
 /**
  * Sinclair — tenant #1 and the demonstration environment.
@@ -188,4 +190,24 @@ export async function seedSecondTenant(sql: Sql): Promise<void> {
     VALUES (${NORTHWIND_TENANT_ID}, 'Northwind Customer', 'customer@northwind.test', true)
     ON CONFLICT DO NOTHING
   `;
+  await sql`
+    INSERT INTO tenant_settings (tenant_id, contact)
+    VALUES (${NORTHWIND_TENANT_ID},
+            ${sql.json({ phone: '+1 902 555 0199', email: 'sales@northwind.test',
+                         addressLine1: '18 Dockside Way', city: 'Halifax',
+                         region: 'NS', postalCode: 'B3H 1A1' })})
+    ON CONFLICT (tenant_id) DO NOTHING
+  `;
+
+  // A catalogue of its own, so isolation can be demonstrated rather than
+  // asserted: a range with no model, trim or colour name in common with
+  // Sinclair's is the only way to prove neither assistant can see the other's.
+  const [existing] = await sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM vehicle_models WHERE tenant_id = ${NORTHWIND_TENANT_ID}
+  `;
+  if (existing!.count === 0) {
+    for (const model of NORTHWIND_CATALOGUE) {
+      await writeModel(sql, NORTHWIND_TENANT_ID, model);
+    }
+  }
 }

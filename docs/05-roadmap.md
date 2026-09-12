@@ -113,6 +113,16 @@ be demonstrated today. Swapping in Claude changes one function.
 
 ---
 
+## M8 — The scripted AI layer ✅
+
+Selectable by `AI_PROVIDER`, with no dealership's catalogue inside it: models come from
+the tenant's own range and trims, colours and engines are resolved against what the
+tools return. Extraction runs deterministically into the existing scoring, so the portal
+reflects the conversation. Proven across every model in the catalogue and against a
+second tenant with an entirely different range.
+
+---
+
 ## Sequencing principles
 
 1. **Nothing fake.** If a surface isn't wired to the backend, it doesn't ship — §60.

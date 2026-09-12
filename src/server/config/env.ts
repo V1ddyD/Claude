@@ -17,6 +17,20 @@ const schema = z.object({
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
 
+  /**
+   * Which AI implementation answers customers.
+   *
+   * 'scripted' is the deterministic assistant: no credential, no network, the
+   * same tools. 'anthropic' is the model. 'auto' — the default — is
+   * 'anthropic' when a credential exists and 'scripted' when none does, so a
+   * fresh checkout works and a configured deployment uses the model.
+   *
+   * Selecting 'scripted' explicitly must never require a credential, and
+   * selecting 'anthropic' without one is a configuration error worth hearing
+   * about at boot rather than in front of a customer.
+   */
+  AI_PROVIDER: z.enum(['auto', 'scripted', 'anthropic']).default('auto'),
+
   ANTHROPIC_API_KEY: z.string().optional(),
   /** Alternative credential the SDK resolves on its own. */
   ANTHROPIC_AUTH_TOKEN: z.string().optional(),
@@ -52,6 +66,16 @@ function load(): Env {
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`);
     throw new Error(`Invalid server environment:\n${issues.join('\n')}`);
+  }
+
+  // Asking for the model without a credential is a misconfiguration, and the
+  // useful moment to say so is at boot. Asking for the scripted assistant
+  // never requires one.
+  if (parsed.data.AI_PROVIDER === 'anthropic' && !parsed.data.ANTHROPIC_API_KEY && !parsed.data.ANTHROPIC_AUTH_TOKEN) {
+    throw new Error(
+      'AI_PROVIDER=anthropic needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN. ' +
+        'Use AI_PROVIDER=scripted (or leave it unset) to run without a credential.',
+    );
   }
 
   // Production must have the real thing. Development may run without optional
@@ -97,6 +121,17 @@ export const features = {
     // not visible here, so a key or token remains the supported path for a
     // deployment; the client itself still falls back to a profile if present.
     return Boolean(env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN);
+  },
+  /**
+   * The AI implementation to use, with 'auto' resolved.
+   *
+   * One place decides. Nothing downstream reads AI_PROVIDER or checks for a
+   * key, so there is no second opinion about which assistant is running.
+   */
+  get aiProvider(): 'scripted' | 'anthropic' {
+    if (env.AI_PROVIDER === 'scripted') return 'scripted';
+    if (env.AI_PROVIDER === 'anthropic') return 'anthropic';
+    return features.ai ? 'anthropic' : 'scripted';
   },
   get email() {
     return Boolean(env.RESEND_API_KEY);

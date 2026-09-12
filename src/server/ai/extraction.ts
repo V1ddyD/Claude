@@ -6,6 +6,12 @@ import { messages as messagesTable, conversations, leads } from '@/server/db/sch
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 import { modelClient, EXTRACTION_MODEL, type ModelClient } from '@/server/ai/client';
 import { RuleBasedModel } from '@/server/ai/rule-based';
+import { extractSignals, type ResolvedBuild } from '@/server/ai/rule-based/signals';
+import { remember } from '@/server/ai/rule-based';
+import {
+  resolveTrim, resolvePowertrain, resolveColour,
+} from '@/server/ai/rule-based/resolve';
+import { vehicleModels, trims, powertrains, colours } from '@/server/db/schema';
 import { EXTRACTION_SYSTEM_PROMPT } from '@/server/ai/prompts/system';
 import { leadSignalsSchema, type LeadSignals } from '@/server/services/scoring/signals';
 import { applySignals, recomputePriority, findLeadForConversation } from '@/server/services/leads';
@@ -50,12 +56,42 @@ export async function extractAndScore(params: {
     if (!lead) return { leadId: null, signals: {}, skipped: 'no-lead' };
     if (!client) return { leadId: lead.id, signals: {}, skipped: 'no-client' };
 
-    // Pass B is inference, and the rule-based assistant does not infer. Asking
-    // it to read a transcript would be a pointless round trip that could only
-    // return nothing. Scoring still happens: the write tools record name,
-    // email and model at full confidence, which is most of what moves a lead.
+    // Pass B, deterministically.
+    //
+    // Asking the rule-based assistant to read a transcript as prose would be a
+    // pointless round trip. What it can do is exactly what the model is asked
+    // to do — produce evidence — and the SAME rule engine turns that evidence
+    // into a priority. No scoring happens here (spec §16).
     if (client instanceof RuleBasedModel) {
-      return { leadId: lead.id, signals: {}, skipped: 'no-model' };
+      const exchanges = await loadExchanges(db, params.conversationId);
+      const vocabulary = await loadVocabulary(db);
+      const signals = extractSignals(exchanges, {
+        vocabulary,
+        resolved: await resolveBuild(db, params.conversationId, exchanges, vocabulary),
+      });
+
+      const parsed = leadSignalsSchema.safeParse(signals);
+      // Validated like any other extraction output. A field that does not fit
+      // the contract is dropped rather than coerced, whatever produced it.
+      if (!parsed.success) {
+        return { leadId: lead.id, signals: {}, skipped: 'invalid-output' };
+      }
+      if (Object.keys(parsed.data).length === 0) {
+        return { leadId: lead.id, signals: {}, skipped: 'no-signals' };
+      }
+
+      await applySignals(db, lead.id, parsed.data, { source: 'ai' });
+      const scored = await recomputePriority(db, lead.id);
+      await writeSummary(db, lead.id, parsed.data);
+      await writeRollingSummary(db, params.conversationId, parsed.data);
+
+      return {
+        leadId: lead.id,
+        signals: parsed.data,
+        priority: scored.priority,
+        score: scored.score,
+        rationale: scored.rationale,
+      };
     }
 
     const transcript = await loadTranscript(db, params.conversationId);
@@ -105,6 +141,144 @@ function recordSignalsTool(): Anthropic.Tool {
       $refStrategy: 'none',
     }) as Anthropic.Tool['input_schema'],
   };
+}
+
+/**
+ * The conversation as customer messages paired with what preceded them.
+ *
+ * The same shape the assistant itself reads, so extraction sees exactly what
+ * the conversation saw — including which question each answer was answering.
+ */
+async function loadExchanges(
+  db: TenantDb,
+  conversationId: string,
+): Promise<{ asked: string; said: string }[]> {
+  const rows = await db
+    .select({ role: messagesTable.role, content: messagesTable.content })
+    .from(messagesTable)
+    .where(
+      and(eq(messagesTable.tenantId, db.tenantId), eq(messagesTable.conversationId, conversationId)),
+    )
+    .orderBy(asc(messagesTable.seq));
+
+  const exchanges: { asked: string; said: string }[] = [];
+  let asked = '';
+
+  for (const row of rows) {
+    if (!row.content) continue;
+    if (row.role === 'assistant') asked = row.content;
+    else if (row.role === 'user') {
+      exchanges.push({ asked, said: row.content });
+      asked = '';
+    }
+  }
+  return exchanges;
+}
+
+/** This tenant's range, so extraction recognises the same models the chat did. */
+async function loadVocabulary(db: TenantDb) {
+  const rows = await db
+    .select({ slug: vehicleModels.slug, name: vehicleModels.fullName })
+    .from(vehicleModels)
+    .where(and(eq(vehicleModels.tenantId, db.tenantId), eq(vehicleModels.status, 'published')));
+  return { models: rows };
+}
+
+/**
+ * Configuration codes taken from the tool calls the conversation actually made.
+ *
+ * A code that reached a tool was validated by that tool, so it names a build
+ * the dealership offers. Re-deriving codes from the customer's wording here
+ * would be guessing at what was already established.
+ */
+async function resolveBuild(
+  db: TenantDb,
+  conversationId: string,
+  exchanges: { asked: string; said: string }[],
+  vocabulary: { models: { slug: string; name: string }[] },
+): Promise<ResolvedBuild> {
+  const fromTools = await loadResolvedBuild(db, conversationId);
+
+  // A customer can state a trim without anything pricing it — "I want the S5
+  // Premium, and can I drive it Saturday?" books a test drive and never calls
+  // the price tool. So what they said is offered to the catalogue directly;
+  // the catalogue still decides whether it names anything.
+  const memory = remember(exchanges, vocabulary);
+  if (!memory.modelSlug) return fromTools;
+
+  const [model] = await db
+    .select({ id: vehicleModels.id })
+    .from(vehicleModels)
+    .where(and(eq(vehicleModels.tenantId, db.tenantId), eq(vehicleModels.slug, memory.modelSlug)))
+    .limit(1);
+  if (!model) return fromTools;
+
+  const resolved: ResolvedBuild = { ...fromTools };
+
+  if (!resolved.trimCode) {
+    const rows = await db
+      .select({ code: trims.code, name: trims.name })
+      .from(trims)
+      .where(and(eq(trims.tenantId, db.tenantId), eq(trims.modelId, model.id)));
+    resolved.trimCode = resolveTrim(memory.words, rows)?.code;
+  }
+
+  if (!resolved.powertrainCode) {
+    const rows = await db
+      .select({
+        code: powertrains.code, name: powertrains.name, type: powertrains.kind,
+      })
+      .from(powertrains)
+      .where(and(eq(powertrains.tenantId, db.tenantId), eq(powertrains.modelId, model.id)));
+    resolved.powertrainCode = resolvePowertrain(
+      memory.words,
+      rows.map((row) => ({ ...row, offeredWithTrims: [] })),
+    )?.code;
+  }
+
+  if (!resolved.exteriorColourCode && memory.colourWords.length > 0) {
+    const rows = await db
+      .select({ code: colours.code, name: colours.name })
+      .from(colours)
+      .where(
+        and(
+          eq(colours.tenantId, db.tenantId),
+          eq(colours.modelId, model.id),
+          eq(colours.kind, 'exterior'),
+        ),
+      );
+    resolved.exteriorColourCode = resolveColour(memory.colourWords, rows)?.code;
+  }
+
+  return resolved;
+}
+
+async function loadResolvedBuild(
+  db: TenantDb,
+  conversationId: string,
+): Promise<ResolvedBuild> {
+  const rows = await db
+    .select({ toolName: messagesTable.toolName, toolInput: messagesTable.toolInput })
+    .from(messagesTable)
+    .where(
+      and(
+        eq(messagesTable.tenantId, db.tenantId),
+        eq(messagesTable.conversationId, conversationId),
+        eq(messagesTable.role, 'tool'),
+      ),
+    )
+    .orderBy(asc(messagesTable.seq));
+
+  const resolved: ResolvedBuild = {};
+  for (const row of rows) {
+    const input = (row.toolInput ?? {}) as Record<string, unknown>;
+    if (typeof input.trimCode === 'string') resolved.trimCode = input.trimCode;
+    if (typeof input.powertrainCode === 'string') resolved.powertrainCode = input.powertrainCode;
+    if (typeof input.exteriorColourCode === 'string') {
+      resolved.exteriorColourCode = input.exteriorColourCode;
+    }
+  }
+  return resolved;
 }
 
 async function loadTranscript(db: TenantDb, conversationId: string): Promise<string> {

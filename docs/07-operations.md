@@ -42,6 +42,11 @@ ANTHROPIC_API_KEY=sk-ant-...
 The operator's key, set once, server-side. Customers never supply, see, or are asked for
 one — enforced by a lint rule, a test, and a CI grep of the built client bundle.
 
+`AI_PROVIDER` chooses which assistant answers: `scripted`, `anthropic`, or `auto`
+(default — the model if a key is present, otherwise scripted). `AI_PROVIDER=scripted`
+needs no credential at all; `AI_PROVIDER=anthropic` without one fails at boot with a
+message saying so.
+
 Absent, the rule-based assistant answers instead: the same tools and the same live data,
 a fixed set of instructions rather than a model. The site is fully usable — customers can
 price a build, check stock, book a test drive and reach the team — it is simply plainer,
@@ -157,7 +162,7 @@ is the failure — not the application code.
 
 ```bash
 npm run db:reset && npm run db:seed    # Sinclair, 10 models, 86 units
-npm test                               # 309 assertions
+npm test                               # 346 assertions
 npm run eval                           # scripted — measures the system
 npm run eval:rules                     # measures the assistant that ships today
 npm run eval:live                      # needs a key; measures the model itself
