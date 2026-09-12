@@ -6,7 +6,12 @@
 
 [build]
   command = "npm run build"
-  publish = ".next"
+  # No `publish`. Setting one stops Netlify's Next.js runtime taking over and
+  # the build is then served as static files, which for an app of entirely
+  # dynamic routes means every page 404s. The runtime decides what to publish.
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
 
 [build.environment]
   # The migrations and the seed are run once, by hand, against the hosted

@@ -1,0 +1,8 @@
+{
+  "0001_initial_schema.sql": "4b7f6a8a7ab837c2a0b86eb0c7180c89e93e1d34c5ae99732070d385ce537940",
+  "0002_rls_and_roles.sql": "77cc827633253880065ee51f2254000c26d2c551d10b57f0713622df08c7394b",
+  "0003_powertrain_battery_check.sql": "ae9dceb569a7475b2509483f9acf986eb5bee4b81fc4a63ae3676ecad315532a",
+  "0004_rate_limits_and_access_tokens.sql": "f3d7ef4032301ec56f50c5ff885f30077cfc715cffeb899a728f9572db48cb73",
+  "0005_rate_limit_no_tenant_column.sql": "f403305665eb6091a723842afc5a2709da3f645d434e8ff2a0da6d9c2216fb7f",
+  "__seed_rows": "757"
+}

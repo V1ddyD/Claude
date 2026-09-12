@@ -2,6 +2,7 @@ import 'server-only';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { unscopedDb } from '@/server/db/client';
+import { env } from '@/server/config/env';
 import { AppError } from '@/server/errors';
 
 /**
@@ -31,6 +32,26 @@ export type TenantDb = DrizzleTx & {
 };
 
 const uuid = z.string().uuid();
+
+/**
+ * Drop to the request role for the rest of the transaction.
+ *
+ * A no-op when the deployment connects as an unprivileged role already, which
+ * is the case wherever two connection strings are configured. Where the
+ * platform supplies one role that owns the tables, this is what stops the
+ * request path running with the owner's privileges — RLS is FORCEd, so it would
+ * still apply, but the table grants would not, and `audit_logs` being
+ * append-only is a grant.
+ *
+ * `SET LOCAL` reverts at the end of the transaction, so nothing leaks between
+ * pooled connections. The role name is validated as an identifier when the
+ * environment is read; it is never taken from a request.
+ */
+async function assumeRequestRole(tx: DrizzleTx): Promise<void> {
+  const role = env.DATABASE_REQUEST_ROLE;
+  if (!role) return;
+  await tx.execute(sql.raw(`SET LOCAL ROLE "${role}"`));
+}
 
 export interface TenantContext {
   tenantId: string;
@@ -62,6 +83,9 @@ export async function withTenant<T>(
   }
 
   return unscopedDb.transaction(async (tx) => {
+    // Privilege first, before anything is read or written.
+    await assumeRequestRole(tx);
+
     // set_config(..., is_local => true) is transaction-scoped, like SET LOCAL,
     // and unlike SET LOCAL it accepts a bound parameter rather than requiring
     // string interpolation into DDL-ish syntax.
@@ -91,6 +115,7 @@ export async function withAuthSubject<T>(
     throw new AppError('UNAUTHENTICATED', 'Invalid session.', { internal: { authUserId } });
   }
   return unscopedDb.transaction(async (tx) => {
+    await assumeRequestRole(tx);
     await tx.execute(sql`select set_config('app.auth_user_id', ${authUserId}, true)`);
     return fn(tx);
   });
@@ -109,5 +134,11 @@ export async function withoutTenantScope<T>(
   fn: (db: typeof unscopedDb) => Promise<T>,
 ): Promise<T> {
   void reason;
+  // Deliberately not privilege-dropped: these are control-plane operations
+  // (resolving a hostname, claiming a job, sweeping counters) and several are
+  // single statements rather than transactions, which is where SET LOCAL would
+  // have to live. Where two connection strings are configured they already run
+  // as the unprivileged role; under a single owner credential they run as the
+  // owner, which is the one place that posture is looser than the design.
   return fn(unscopedDb);
 }

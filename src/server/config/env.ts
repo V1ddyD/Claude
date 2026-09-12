@@ -13,6 +13,27 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   DATABASE_ADMIN_URL: z.string().optional(),
 
+  /**
+   * A role to assume for the duration of every request transaction.
+   *
+   * The design wants the request path connecting as an unprivileged role, so
+   * that RLS and the table grants apply to it. Two connection strings is the
+   * direct way to get that and it is what a self-managed Postgres gives you.
+   *
+   * A managed platform often gives you ONE role, which owns the tables. Naming
+   * a role here makes every tenant transaction `SET LOCAL ROLE` to it first,
+   * which reaches the same privilege posture from a single credential: the
+   * query runs as that role, RLS evaluates against it, and the role reverts
+   * when the transaction ends.
+   *
+   * An identifier, not a string: it cannot be a bound parameter in SET ROLE, so
+   * the shape is constrained here rather than escaped at the call site.
+   */
+  DATABASE_REQUEST_ROLE: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]{0,62}$/, 'DATABASE_REQUEST_ROLE must be a plain lowercase identifier')
+    .optional(),
+
   NEXT_PUBLIC_SUPABASE_URL: z.string().optional(),
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
@@ -80,6 +101,16 @@ let cached: Env | undefined;
  */
 function load(): Env {
   if (cached) return cached;
+
+  // The platform may have provisioned the database and named the variable
+  // itself. Mapped rather than duplicated, so nothing downstream has to know
+  // which host it is running on.
+  if (!process.env.DATABASE_URL && process.env.NETLIFY_DATABASE_URL) {
+    process.env.DATABASE_URL = process.env.NETLIFY_DATABASE_URL;
+  }
+  if (!process.env.DATABASE_ADMIN_URL && process.env.NETLIFY_DATABASE_URL_UNPOOLED) {
+    process.env.DATABASE_ADMIN_URL = process.env.NETLIFY_DATABASE_URL_UNPOOLED;
+  }
 
   // An empty variable is not a configured value.
   //
