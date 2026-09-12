@@ -6,9 +6,10 @@ import { respondToMessage } from '@/server/ai/conversation';
 import { ensureConversation } from '@/server/ai/extraction';
 import { applySignals, recomputePriority, findLeadForConversation } from '@/server/services/leads';
 import { modelClient, type ModelClient, type ModelRequest, type ModelTurn } from '@/server/ai/client';
+import { RuleBasedModel } from '@/server/ai/rule-based';
 import {
   DEFAULT_EVAL_BUDGET, estimateCostUsd,
-  type EvalBudget, type EvalCase, type EvalResult, type TokenUsage,
+  type EvalBudget, type EvalCase, type EvalDriver, type EvalResult, type TokenUsage,
 } from './types';
 
 /**
@@ -18,6 +19,29 @@ import {
  * projections — so what it measures is the system as shipped, not a mock of it.
  * Only the model is substituted, and only in scripted mode.
  */
+
+/**
+ * Records everything the assistant was shown, for the leakage assertions.
+ *
+ * Wrapped rather than built into each client: what reached the context is a
+ * property of the run, not of which assistant is answering, and it has to be
+ * checkable whichever one is.
+ */
+class WatchedClient implements ModelClient {
+  readonly seen: string[] = [];
+
+  constructor(private readonly inner: ModelClient) {}
+
+  async converse(request: ModelRequest): Promise<ModelTurn> {
+    this.seen.push(request.system + JSON.stringify(request.messages));
+    return this.inner.converse(request);
+  }
+
+  async stream(request: ModelRequest, onDelta: (text: string) => void): Promise<ModelTurn> {
+    this.seen.push(request.system + JSON.stringify(request.messages));
+    return this.inner.stream(request, onDelta);
+  }
+}
 
 /**
  * Wraps the live client to meter spend and stop when the budget is reached.
@@ -93,10 +117,11 @@ class CaseModel implements ModelClient {
 export async function runCase(
   tenantId: string,
   testCase: EvalCase,
-  options: { live?: boolean; meter?: MeteredClient } = {},
+  options: { driver?: EvalDriver; meter?: MeteredClient } = {},
 ): Promise<EvalResult> {
-  const live = options.live ?? false;
+  const driver = options.driver ?? 'scripted';
   const failures: string[] = [];
+  const observations: string[] = [];
   const replies: string[] = [];
   const toolsUsed: string[] = [];
 
@@ -114,17 +139,26 @@ export async function runCase(
     { text: turn.reply ?? '', tools: [] },
   ]);
 
-  const client = live ? (options.meter ?? modelClient()) : new CaseModel(script);
-  if (!client) {
+  const chosen =
+    driver === 'live'
+      ? (options.meter ?? modelClient())
+      : driver === 'rules'
+        ? new RuleBasedModel()
+        : new CaseModel(script);
+
+  if (!chosen) {
     return {
       name: testCase.name,
       intent: testCase.intent,
       passed: false,
       failures: ['live mode requested but no model is configured'],
+      observations: [],
       toolsUsed: [],
       replies: [],
     };
   }
+
+  const client = new WatchedClient(chosen);
 
   for (const turn of testCase.turns) {
     try {
@@ -172,8 +206,14 @@ export async function runCase(
   // ---- Assertions ---------------------------------------------------------
   const expect = testCase.expect;
 
+  // In rules mode the positive expectations describe how a MODEL is expected
+  // to reach an answer. The rule-based assistant sometimes reaches the same
+  // answer another way, so those are recorded rather than counted against it.
+  // Everything below that concerns what must NOT happen stays a failure.
+  const mechanism = driver === 'rules' ? observations : failures;
+
   for (const tool of expect.calledTools ?? []) {
-    if (!toolsUsed.includes(tool)) failures.push(`expected ${tool} to be called`);
+    if (!toolsUsed.includes(tool)) mechanism.push(`expected ${tool} to be called`);
   }
   for (const tool of expect.neverCalledTools ?? []) {
     if (toolsUsed.includes(tool)) failures.push(`${tool} should not have been called`);
@@ -186,9 +226,11 @@ export async function runCase(
     }
   }
 
-  const modelSaw = client instanceof CaseModel ? client.seen.join('\n') : '';
+  // Checked in every mode. Whatever is deciding the reply, internal data must
+  // never have been shown to it.
+  const assistantSaw = client.seen.join('\n');
   for (const phrase of expect.neverInModelContext ?? []) {
-    if (modelSaw.includes(phrase)) failures.push(`"${phrase}" reached the model context`);
+    if (assistantSaw.includes(phrase)) failures.push(`"${phrase}" reached the model context`);
   }
 
   if (expect.toolErrorCode) {
@@ -206,12 +248,14 @@ export async function runCase(
     );
     const codes = toolResults.map((r) => (r.result as { code?: string } | null)?.code);
     if (!codes.includes(expect.toolErrorCode)) {
-      failures.push(`expected a tool to return ${expect.toolErrorCode}, saw ${codes.join(', ') || 'none'}`);
+      mechanism.push(
+        `expected a tool to return ${expect.toolErrorCode}, saw ${codes.join(', ') || 'none'}`,
+      );
     }
   }
 
   if (expect.priority && priority !== expect.priority) {
-    failures.push(`expected priority ${expect.priority}, got ${priority ?? 'none'}`);
+    mechanism.push(`expected priority ${expect.priority}, got ${priority ?? 'none'}`);
   }
 
   return {
@@ -219,6 +263,7 @@ export async function runCase(
     intent: testCase.intent,
     passed: failures.length === 0,
     failures,
+    observations,
     toolsUsed,
     replies,
     ...(priority ? { priority } : {}),
@@ -235,14 +280,17 @@ export interface CorpusReport {
 export async function runCorpus(
   tenantId: string,
   cases: EvalCase[],
-  options: { live?: boolean; budget?: EvalBudget } = {},
+  options: { driver?: EvalDriver; budget?: EvalBudget } = {},
 ): Promise<CorpusReport> {
-  const live = options.live ?? false;
+  const driver = options.driver ?? 'scripted';
+  const live = driver === 'live';
   const budget = options.budget ?? DEFAULT_EVAL_BUDGET;
 
-  const applicable = cases.filter(
-    (c) => c.mode === 'both' || c.mode === (live ? 'live' : 'scripted'),
-  );
+  // 'rules' runs the cases where the assistant chooses its own tools, which is
+  // the same set 'live' runs. The scripted-only cases inject tool calls to
+  // exercise scoring, and injecting them would measure nothing about it.
+  const wants = driver === 'scripted' ? 'scripted' : 'live';
+  const applicable = cases.filter((c) => c.mode === 'both' || c.mode === wants);
 
   const inner = live ? modelClient() : null;
   const meter = live && inner ? new MeteredClient(inner, budget) : undefined;
@@ -252,7 +300,7 @@ export async function runCorpus(
 
   for (const testCase of applicable) {
     const before = meter ? { ...meter.usage } : undefined;
-    const result = await runCase(tenantId, testCase, { live, meter });
+    const result = await runCase(tenantId, testCase, { driver, meter });
 
     if (meter && before) {
       result.usage = {

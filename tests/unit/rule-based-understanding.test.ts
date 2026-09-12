@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   understand, nameFromReply, findConfirmationCode, findOrdinal,
-  findTradeInVehicle, saidMatchesSlot, chosenFromOffer,
+  findTradeInVehicle, saidMatchesSlot, chosenFromOffer, unofferedColour,
 } from '../../src/server/ai/rule-based/understand';
 import { readConversation, remember, ASKS } from '../../src/server/ai/rule-based/state';
 import { decide } from '../../src/server/ai/rule-based/script';
@@ -22,6 +22,10 @@ describe('classifying what was asked', () => {
     ['Which trims are there?', 'trims'],
     ['What options come with it?', 'options'],
     ['What is standard on the Premium?', 'features'],
+    ['Do you have any S5s in stock?', 'stock'],
+    ['What is the best price you can do today?', 'human'],
+    ['What is my 2019 BMW 3 Series worth?', 'trade_in'],
+    ['Can I get the S5 in lime green?', 'colours'],
     ['How much is the S5 Premium?', 'price'],
     ['Do you have any in stock?', 'stock'],
     ['S5 or X7, which is better?', 'compare'],
@@ -83,6 +87,18 @@ describe('reading details back', () => {
     expect(findOrdinal('the second one please')).toBe(1);
     expect(findOrdinal('number 3')).toBe(2);
     expect(findOrdinal('the S5 please')).toBeUndefined();
+  });
+
+  it('keeps a colour question about a colour we do not sell', () => {
+    expect(unofferedColour('in lime green')).toBe('green');
+    // One we do sell is not a complaint.
+    expect(unofferedColour('in Obsidian Black')).toBeUndefined();
+  });
+
+  it('reads a model name that carries digits or two words', () => {
+    expect(findTradeInVehicle('my 2019 BMW 3 Series').model).toBe('3 Series');
+    expect(findTradeInVehicle('a 2021 Tesla Model 3, 40,000 km').model).toBe('Model 3');
+    expect(findTradeInVehicle('2018 Mercedes C-Class and 90,000 km').model).toBe('C-Class');
   });
 
   it('reads a trade-in vehicle, converting miles because the field is km', () => {
@@ -160,6 +176,58 @@ describe('what it will act on', () => {
     expect(decision.text).toContain(ASKS.model);
     // Offers only what this dealership's prompt said it sells.
     expect(decision.text).toContain('Sinclair S5');
+  });
+
+  it('says outright that we do not make a car we do not make', () => {
+    const decision = turn({ role: 'user', content: 'Tell me about the Sinclair Z9' });
+    expect(decision.tools).toEqual([]);
+    expect(decision.text).toContain('We do not make a Z9');
+    // And names what does exist, which is the useful half of the answer.
+    expect(decision.text).toContain('Sinclair S5');
+  });
+
+  it('reads the letter, not the spelling, for the article', () => {
+    expect(turn({ role: 'user', content: 'Do you sell the X9?' }).text).toContain('an X9');
+    expect(turn({ role: 'user', content: 'Do you sell the Z9?' }).text).toContain('a Z9');
+  });
+
+  it('does not deny making a car when the token is a deadline', () => {
+    // "by Q3" is when they want it. Denying we build a Q3 would be absurd.
+    const deadline = turn({ role: 'user', content: 'Can I get a car by Q3 next year?' });
+    expect(deadline.text).not.toMatch(/do not make/i);
+
+    // Whereas a rival's model, named on its own, is exactly what to deny.
+    expect(turn({ role: 'user', content: 'Do you sell the Q4?' }).text).toContain('do not make');
+  });
+
+  it('leaves a real model alone when another token sits beside it', () => {
+    const decision = turn({ role: 'user', content: 'Do you have the S5 in stock by Q3?' });
+    expect(decision.tools.map((tool) => tool.name)).toEqual(['checkInventory']);
+  });
+
+  it('quotes no price the digest happened to carry', () => {
+    // The digest routes a question; it does not answer one. A figure in a
+    // reply has to have come from a tool in this conversation.
+    const decision = turn({ role: 'user', content: 'What colours are there?' });
+    expect(decision.text).toContain('Sinclair S5');
+    expect(decision.text).not.toMatch(/\$/);
+  });
+
+  it('asks only for the trade-in details it does not already have', () => {
+    const decision = turn({ role: 'user', content: 'What is my 2019 BMW 3 Series worth?' });
+    expect(decision.text).toContain('rough mileage');
+    expect(decision.text).toContain('2019 BMW 3 Series');
+    // Not the year and make it was just told.
+    expect(decision.text).not.toContain('year, make, model');
+  });
+
+  it('keeps the appraisal flow alive across the answer to a tailored question', () => {
+    const decision = turn(
+      { role: 'user', content: 'What is my 2019 BMW 3 Series worth?' },
+      { role: 'assistant', content: `${ASKS.appraisal} What is the rough mileage of the 2019 BMW 3 Series?` },
+      { role: 'user', content: 'About 95,000 km' },
+    );
+    expect(decision.text).toContain(ASKS.condition);
   });
 
   it('carries a flow across a bare answer', () => {

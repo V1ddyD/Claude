@@ -81,8 +81,10 @@ describe('the rule-based assistant', () => {
     expect(colours.text).toContain('Interior:');
 
     const nonsense = await chat.say('Do you sell the Z9?');
-    // No such model, so no tool can answer it and nothing is invented.
-    expect(nonsense.text).not.toMatch(/Z9/i);
+    // Says plainly that it does not exist and names what does — and attaches
+    // no figure to anything, because no tool priced it.
+    expect(nonsense.text).toMatch(/do not make a Z9/i);
+    expect(nonsense.text).toContain('Sinclair E5');
     expect(nonsense.text).not.toMatch(/\$\d/);
   });
 
@@ -181,6 +183,37 @@ describe('the rule-based assistant', () => {
     expect(handed.toolsUsed).toContain('requestHumanHandoff');
     // Never implies a person has already replied.
     expect(handed.text).toMatch(/not replied yet/i);
+  });
+
+  it('says a combination is not built rather than pricing a different one', async () => {
+    const chat = await conversation();
+
+    const asked = await chat.say('How much is the S5 Luxury with the 2.0 Turbo?');
+
+    // The 2.0 Turbo is not offered on the Luxury. Substituting a compatible
+    // engine would return a real price for a car they did not ask about.
+    expect(asked.toolsUsed).not.toContain('calculateVehiclePrice');
+    expect(asked.text).toMatch(/not offered on the Luxury/i);
+    expect(asked.text).toMatch(/3\.0 Turbo AWD/);
+    expect(asked.text).not.toMatch(/Total/);
+  });
+
+  it('says a colour is not offered before listing the ones that are', async () => {
+    const chat = await conversation();
+
+    const asked = await chat.say('Can I get the S5 Premium in lime green?');
+    expect(asked.toolsUsed).toEqual(['getVehicleColours']);
+    expect(asked.text).toMatch(/do not offer a green/i);
+    expect(asked.text).toContain('Obsidian Black');
+  });
+
+  it('hands a negotiation to a person instead of quoting list price', async () => {
+    const chat = await conversation();
+
+    const asked = await chat.say('What is the best price you can do on an S5 if I buy today?');
+    expect(asked.toolsUsed).toEqual([]);
+    expect(asked.text).not.toMatch(/\$/);
+    expect(asked.text).toMatch(/specialist/i);
   });
 
   it('separates what is standard from what costs extra', async () => {

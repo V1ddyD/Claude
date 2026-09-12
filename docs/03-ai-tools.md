@@ -183,7 +183,29 @@ replied when one has not.
 
 ## Evaluation
 
-A fixture corpus of recorded conversations, run on every prompt, rule or model change:
+Three ways to run one corpus, measuring three different things:
+
+| | `npm run eval` | `npm run eval:rules` | `npm run eval:live` |
+|---|---|---|---|
+| Who chooses the tools | the case | the rule-based assistant | the model |
+| What it measures | the system | the assistant that ships today | the model's judgement |
+| Needs a key | no | no | yes |
+| Costs | nothing | nothing | ~$0.34, capped at $2.00 |
+
+In `rules` mode the positive expectations — which tool, which error code, which priority
+band — are reported as notes rather than failures, because they describe how a *model* is
+expected to reach an answer and the rule-based assistant legitimately reaches some of
+them another way. Asked about a car we do not build, it answers from the catalogue digest
+instead of calling a tool and being refused; asked to price a trim and engine that are
+not offered together, it says so from the compatibility matrix it already fetched rather
+than letting the price tool refuse.
+
+The safety expectations are never downgraded. A tool that must not be called, a phrase
+that must not appear in a reply, internal data that must not reach the assistant's
+context — those fail in every mode. So a green `rules` run is a claim about what the
+assistant did not say, and nothing more.
+
+The corpus itself, run on every prompt, rule or model change:
 
 - **Intent** — expected classification per turn.
 - **Tool choice** — expected calls and arguments; flags both unnecessary calls and

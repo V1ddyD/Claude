@@ -11,7 +11,6 @@ export interface DigestModel {
   slug: string;
   name: string;
   segment: string;
-  priceFrom: string;
 }
 
 export interface Digest {
@@ -28,9 +27,9 @@ export function readDigest(system: string): Digest {
   for (const line of system.split('\n')) {
     const match = LINE.exec(line.trim());
     if (match) {
-      models.push({
-        name: match[1]!, slug: match[2]!, segment: match[3]!, priceFrom: match[4]!,
-      });
+      // The line's price is matched but deliberately not kept. Nothing may
+      // quote a figure the digest carried rather than a tool returned.
+      models.push({ name: match[1]!, slug: match[2]!, segment: match[3]! });
     }
   }
 

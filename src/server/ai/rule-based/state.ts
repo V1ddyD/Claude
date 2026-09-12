@@ -239,6 +239,14 @@ export const ASKS = {
   time: 'Which of those times suits you?',
   model: 'Which model did you have in mind?',
   code: 'What is the confirmation code on your booking, and the email address it was made with?',
+  /**
+   * The appraisal lead-in, kept as a constant of its own.
+   *
+   * The vehicle question is phrased from what is still missing, so the wording
+   * varies. This fragment does not, which is what lets the next message be
+   * recognised as an answer to it rather than a change of subject.
+   */
+  appraisal: 'Happy to get that appraised.',
   vehicle: 'What is the year, make, model and rough mileage of your current car?',
   condition: 'How would you describe its condition — excellent, good, fair or poor?',
   finance: 'Would you like a specialist to confirm the terms?',

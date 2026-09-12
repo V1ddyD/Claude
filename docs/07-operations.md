@@ -157,14 +157,19 @@ is the failure — not the application code.
 
 ```bash
 npm run db:reset && npm run db:seed    # Sinclair, 10 models, 86 units
-npm test                               # 293 assertions
-npm run eval                           # the scripted assistant corpus
+npm test                               # 309 assertions
+npm run eval                           # scripted — measures the system
+npm run eval:rules                     # measures the assistant that ships today
 npm run eval:live                      # needs a key; measures the model itself
 ```
 
 `eval:live` stops itself at 60 requests, 400k tokens or $2.00. A full run costs roughly
 $0.34 with prompt caching — the system prompt and tool definitions are a cacheable
 prefix, which is most of the difference.
+
+`eval:rules` costs nothing and needs no key. Read its closing note: a green run there
+means the assistant said nothing it should not have, not that it chose the tools a model
+would choose. The two are different claims and only `eval:live` supports the second.
 
 ---
 

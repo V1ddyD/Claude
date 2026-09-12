@@ -663,6 +663,41 @@ word by word.
 Four of those seven only appeared because the suite was run repeatedly against an
 accumulating database rather than once against a clean one.
 
+### Then measured, which found six more
+
+`npm run eval:rules` runs the same corpus against the rule-based assistant instead of a
+script, so the twelve cases that matter commercially are now measurable without a key.
+The first run failed one case and left nine notes. Every one was worth acting on:
+
+1. **It quoted prices from the catalogue digest.** Asked about a car we do not make, the
+   reply listed the range with each model's price — figures no tool had returned in that
+   conversation, which is precisely what the grounding rule forbids. The digest routes a
+   question; it does not answer one. It now lists names and segments only.
+2. **An unbuildable combination was silently priced as a different car.** "The S5 Luxury
+   with the 2.0 Turbo" is not built. The resolver substituted a compatible engine and
+   returned a real price for a car the customer had not asked about. It now says the pair
+   is not offered and names what the trim IS offered with.
+3. **Negotiation was answered with list price.** "The best price you can do" is a request
+   no assistant here has the authority to answer, and quoting MSRP answers a different
+   question. It now hands over to a person (spec §15).
+4. **Plural model names were invisible.** "Do you have any S5s in stock?" identified no
+   model, so it asked which one — the same missing `s?` that had already cost the
+   classifier half its intents.
+5. **"What is my 2019 BMW 3 Series worth?" was not recognised as a trade-in**, and when
+   it was, the model name parser lost everything after the make: "3 Series", "Model 3"
+   and "C-Class" all became nothing. Fixed, and the appraisal question now asks only for
+   what is still missing rather than re-asking for the year it was just given.
+6. **A finance question with a price in it still asked which car.** "What would $58,900
+   cost me monthly over 60 months?" does not depend on the model; it now estimates
+   directly.
+
+A seventh came out of reading the replies rather than the assertions: asked for lime
+green, it listed the nine colours we do offer without ever saying that theirs was not
+among them.
+
+Two of those — the digest prices and the silent substitution — are the kind of thing a
+demo would not have shown and a customer would have relied on.
+
 ### Deliberately not built
 
 No `saveBuild` and no `updateContactPreferences` dialogue — both need a back-and-forth

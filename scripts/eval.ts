@@ -1,16 +1,24 @@
 /**
  * Run the assistant evaluation corpus.
  *
- *   npm run eval         scripted — measures the system, no key needed
- *   npm run eval:live    live     — measures the model, needs ANTHROPIC_API_KEY
+ *   npm run eval          scripted — measures the system, no key needed
+ *   npm run eval:rules    rules    — measures the assistant that ships today
+ *   npm run eval:live     live     — measures the model, needs ANTHROPIC_API_KEY
  *
  * Run the live corpus before a demo and after any change to the system prompt,
  * the tool descriptions or the model.
+ *
+ * `rules` drives the rule-based assistant through its own tool choices. Read
+ * the caveat printed at the end of the run: a green rules run says the
+ * assistant said nothing it should not have, NOT that it chose what a model
+ * would choose. It is not a substitute for a live run.
  */
 import { loadEnvFile } from '../src/server/config/load-env-file';
 loadEnvFile('.env.local', '.env.test.local');
 
 const live = process.argv.includes('--live');
+const rules = process.argv.includes('--rules');
+const driver = live ? 'live' : rules ? 'rules' : 'scripted';
 
 async function main() {
   const { runCorpus, EVAL_CASES } = await import('../src/server/ai/evals/run');
@@ -39,8 +47,8 @@ async function main() {
     );
   }
 
-  console.log(`Running the ${live ? 'LIVE' : 'scripted'} corpus...\n`);
-  const report = await runCorpus(tenantId, EVAL_CASES, { live });
+  console.log(`Running the ${driver.toUpperCase()} corpus...\n`);
+  const report = await runCorpus(tenantId, EVAL_CASES, { driver });
   const { results } = report;
 
   for (const result of results) {
@@ -51,10 +59,14 @@ async function main() {
       if (result.toolsUsed.length > 0) {
         console.log(`        tools called: ${result.toolsUsed.join(', ')}`);
       }
-    } else if (live && result.toolsUsed.length > 0) {
-      // On a passing live case the tool choices are the interesting part —
-      // they are what the scripted corpus cannot measure.
+    } else if (driver !== 'scripted' && result.toolsUsed.length > 0) {
+      // When the assistant chose its own tools, those choices are the
+      // interesting part — they are what the scripted corpus cannot measure.
       console.log(`        tools called: ${result.toolsUsed.join(', ')}`);
+    }
+    for (const observation of result.observations) {
+      // Not a failure. A difference in how the answer was reached.
+      console.log(`        note: ${observation}`);
     }
     if (result.usage?.requests) {
       console.log(
@@ -66,6 +78,18 @@ async function main() {
 
   const failed = results.filter((r) => !r.passed).length;
   console.log(`\n${results.length - failed}/${results.length} passed.`);
+
+  if (rules) {
+    const noted = results.reduce((total, r) => total + r.observations.length, 0);
+    console.log(
+      `\n${noted} note(s): expectations about WHICH tool a model would reach for, where\n` +
+        'the rule-based assistant reached the same answer another way. Those are not\n' +
+        'counted as failures. What IS counted: a tool it must not call, a phrase it must\n' +
+        'not say, internal data reaching its context.\n' +
+        '\nA green run here means it said nothing it should not have. It does not measure\n' +
+        'the model — only `npm run eval:live` does that.',
+    );
+  }
 
   if (live) {
     console.log(

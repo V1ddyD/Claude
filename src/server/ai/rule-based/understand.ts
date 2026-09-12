@@ -129,7 +129,22 @@ function classify(lower: string, parsed: Understanding): Intent {
   if (/\b(speak to|talk to|call me|salesperson|someone|a human|a person|advisor)\b/.test(lower)) {
     return /\bcall me\b/.test(lower) ? 'callback' : 'human';
   }
-  if (/\b(trade.?ins?|part.?exchange|my old car|worth for my)\b/.test(lower)) return 'trade_in';
+  // Negotiation goes to a person. Quoting list price at someone asking for a
+  // discount answers a question they did not ask, and no assistant here has
+  // the authority to answer the one they did (spec §15).
+  if (
+    /\b(best price|best you can do|discount|deal on|knock (off|something)|beat (that|this)|haggl|negotiat|cash price|trade (any )?better)\b/.test(
+      lower,
+    )
+  ) {
+    return 'human';
+  }
+  if (
+    /\b(trade.?ins?|part.?exchange|my old car|worth for my)\b/.test(lower) ||
+    /\bwhat(?:'?s| is) my .{0,40}\bworth\b/.test(lower)
+  ) {
+    return 'trade_in';
+  }
   if (/\b(test drives?|drive it|come in and drive|book a drive)\b/.test(lower)) return 'test_drive';
   if (/\b(financ\w*|monthly|per month|a month|each month|payments?|leas\w*|apr|instal)/.test(lower)) {
     return 'finance';
@@ -149,6 +164,10 @@ function classify(lower: string, parsed: Understanding): Intent {
   if (/\b(thanks|thank you|cheers|appreciate)\b/.test(lower)) return 'thanks';
   if (/^\s*(hi|hello|hey|good (morning|afternoon|evening))\b/.test(lower)) return 'greeting';
 
+  // A bare colour word routes here only once nothing stronger has claimed the
+  // message, so "how much is the S5 in black" is still a price question.
+  if (namesAColour(lower) && parsed.modelSlugs.length > 0) return 'colours';
+
   if (parsed.budgetCents || parsed.bodyStyle || parsed.electric) return 'search_vehicles';
   if (parsed.modelSlugs.length > 1) return 'compare';
 
@@ -158,6 +177,41 @@ function classify(lower: string, parsed: Understanding): Intent {
   if (parsed.modelSlugs.length === 1 && wantsOverview(lower)) return 'vehicle_overview';
 
   return 'unknown';
+}
+
+/**
+ * Colour words beyond the ones we sell.
+ *
+ * Asked for lime green, the useful answer is the list of what IS offered — so
+ * the question has to reach the colour tool rather than falling through to "I
+ * do not have that confirmed". These are only ever used to route; a paint code
+ * still comes from COLOURS, which only contains real ones.
+ */
+const COLOUR_WORDS = [
+  'green', 'orange', 'purple', 'pink', 'brown', 'beige', 'cream', 'gold',
+  'bronze', 'copper', 'teal', 'turquoise', 'lime', 'maroon', 'navy', 'olive',
+  'tan', 'ivory', 'champagne', 'burgundy',
+];
+
+/**
+ * A colour the customer named that is not in the palette.
+ *
+ * Answering "here is what we offer" without saying "not that one" leaves them
+ * to work out from a list of nine that theirs is absent.
+ */
+export function unofferedColour(text: string): string | undefined {
+  const lower = text.toLowerCase();
+  if (Object.keys(COLOURS).some((name) => new RegExp(`\\b${name}\\b`).test(lower))) {
+    return undefined;
+  }
+  return COLOUR_WORDS.find((name) => new RegExp(`\\b${name}\\b`).test(lower));
+}
+
+function namesAColour(lower: string): boolean {
+  return (
+    Object.keys(COLOURS).some((name) => new RegExp(`\\b${name}\\b`).test(lower)) ||
+    COLOUR_WORDS.some((name) => new RegExp(`\\b${name}\\b`).test(lower))
+  );
 }
 
 function wantsOverview(lower: string): boolean {
@@ -176,8 +230,10 @@ function findModels(lower: string): string[] {
   const found: string[] = [];
   for (const code of MODEL_CODES) {
     // Word-boundary matched so "s5" does not fire on "is 5 seats" and the
-    // single-letter R does not fire on every stray r.
-    if (new RegExp(`\\b${code}\\b`).test(lower)) found.push(code);
+    // single-letter R does not fire on every stray r. The optional plural is
+    // not cosmetic: "do you have any S5s in stock" is how the question is
+    // actually asked, and without it the model is never identified.
+    if (new RegExp(`\\b${code}s?\\b`).test(lower)) found.push(code);
   }
   return found;
 }
@@ -325,11 +381,18 @@ export interface TradeInVehicle {
 export function findTradeInVehicle(text: string): TradeInVehicle {
   const vehicle: TradeInVehicle = {};
 
-  const named = /\b(19[5-9]\d|20[0-4]\d)\s+([A-Za-z][\w-]{1,20})(?:\s+([A-Za-z][\w-]{1,20}))?/.exec(text);
+  // The model is taken as everything between the make and the end of the
+  // phrase, because plenty of them carry digits or two words — "3 Series",
+  // "Model 3", "C-Class" — and a single-word capture loses half of them.
+  const named =
+    /\b(19[5-9]\d|20[0-4]\d)\s+([A-Za-z][\w-]{1,20})(?:\s+([A-Za-z0-9][\w-]*(?:\s+[A-Za-z0-9][\w-]*)?))?/.exec(
+      text,
+    );
   if (named) {
     vehicle.year = Number(named[1]);
     vehicle.make = named[2];
-    if (named[3] && !/^(with|at|and)$/i.test(named[3])) vehicle.model = named[3];
+    const model = named[3]?.replace(/\s+(with|worth|and|at|in|for|is)$/i, '').trim();
+    if (model && !/^(with|at|and|worth|is|in|for)$/i.test(model)) vehicle.model = model;
   } else {
     const year = /\b(19[5-9]\d|20[0-4]\d)\b/.exec(text);
     if (year) vehicle.year = Number(year[1]);

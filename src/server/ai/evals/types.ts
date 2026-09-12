@@ -1,12 +1,17 @@
 /**
  * The assistant evaluation corpus.
  *
- * Two modes, and the difference matters:
+ * Three ways to run it, and the differences matter:
  *
  *   SCRIPTED — the tool choices come from the case, so what is measured is the
  *              SYSTEM: does it ground answers in tool results, refuse what it
  *              cannot verify, keep internal data out of the model's context,
  *              and score the lead correctly? Runs in CI, needs no API key.
+ *
+ *   RULES    — the rule-based assistant makes its own choices, so what is
+ *              measured is the assistant that SHIPS TODAY. Needs no key.
+ *              Read the caveat on `EvalResult.observations` before reading a
+ *              green run as a green live run: it is not one.
  *
  *   LIVE     — the model makes its own choices, so what is measured is the
  *              MODEL: does it reach for the right tool, decline to invent,
@@ -19,6 +24,9 @@
  */
 
 export type EvalMode = 'scripted' | 'live' | 'both';
+
+/** How a run drives the assistant. Not the same axis as a case's `mode`. */
+export type EvalDriver = 'scripted' | 'rules' | 'live';
 
 export interface EvalTurn {
   /** What the customer says. */
@@ -65,6 +73,25 @@ export interface EvalResult {
   intent: string;
   passed: boolean;
   failures: string[];
+  /**
+   * Expectations that did not hold but are not counted as failures.
+   *
+   * Only in `rules` mode, and only for the positive assertions — which tool
+   * was called, which error code came back, which priority band the lead
+   * landed in. Those describe HOW the model is expected to reach an answer,
+   * and the rule-based assistant legitimately reaches some of them another
+   * way: asked about a car we do not make, it answers from the catalogue
+   * digest it was given rather than by calling a tool and being refused.
+   *
+   * The safety assertions are never downgraded. A tool that must not be
+   * called, a phrase that must not appear in a reply, internal data that must
+   * not reach the assistant's context — those are failures in every mode.
+   *
+   * So a green `rules` run means "said nothing it should not have". It does
+   * NOT mean "chose the tools a model would choose", and it is not a
+   * substitute for a live run.
+   */
+  observations: string[];
   toolsUsed: string[];
   replies: string[];
   priority?: string;

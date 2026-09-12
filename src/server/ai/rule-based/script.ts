@@ -2,8 +2,8 @@ import {
   ASKS, CANNOT_HELP, askedFor, remember,
   type ConversationState, type Memory, type Step,
 } from './state';
-import { saidMatchesSlot } from './understand';
-import { describe } from './compose';
+import { saidMatchesSlot, unofferedColour } from './understand';
+import { describe, sentenceList } from './compose';
 import { readDigest, localDate, type Digest } from './digest';
 
 /**
@@ -48,6 +48,18 @@ export function decide(system: string, state: ConversationState, now: Date): Dec
 /* -------------------------------------------------------------------------- */
 
 function openTurn(m: Memory, digest: Digest, now: Date): Decision {
+  // Asked about a car we do not build, say so and name what we do. The spec is
+  // explicit about this (§"What you may state as fact"), and it is a far better
+  // answer than "I do not have that confirmed" — which is true, but leaves the
+  // customer wondering whether the Z9 exists and we are simply unsure.
+  const invented = inventedModel(m, digest);
+  if (invented) {
+    return say(
+      `We do not make ${article(invented)} ${invented}. ` +
+        `Here is the full ${digest.brandName} range:\n\n${range(digest)}`,
+    );
+  }
+
   switch (m.intent) {
     case 'greeting':
       return say(
@@ -110,6 +122,18 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
 /** Everything that needs to know which car we are talking about. */
 function catalogueTurn(m: Memory, digest: Digest): Decision {
   if (m.intent === 'finance' && applying(m)) return financeRequestTurn(m, digest);
+
+  // "What would $58,900 cost me monthly over 60 months?" needs no car. They
+  // have given the figure; asking which model they meant is asking for
+  // something the answer does not depend on.
+  if (m.intent === 'finance' && !m.modelSlug && m.budgetCents) {
+    return call(
+      t('calculateFinanceEstimate', {
+        vehiclePriceCents: m.budgetCents,
+        termMonths: m.termMonths ?? 60,
+      }),
+    );
+  }
 
   const slug = m.modelSlug;
   if (!slug) return say(`${ASKS.model}\n\n${range(digest)}`);
@@ -194,8 +218,23 @@ function continueTurn(m: Memory, steps: Step[]): Decision {
     !done.has('getVehicleFeatures')
   ) {
     const build = resolveBuild(m, steps);
-    if (build && m.modelSlug) {
-      const input = { modelSlug: m.modelSlug, ...build };
+
+    if (build.kind === 'not-offered') {
+      const offered = build.alternatives.length
+        ? `The ${build.trim.name} comes with the ${sentenceList(build.alternatives)}.`
+        : 'I do not have another engine listed for that trim.';
+      return say(
+        `The ${build.powertrain.name} is not offered on the ${build.trim.name}. ${offered} ` +
+          'Say which you would like and I will price it.',
+      );
+    }
+
+    if (build.kind === 'build' && m.modelSlug) {
+      const input = {
+        modelSlug: m.modelSlug,
+        powertrainCode: build.powertrainCode,
+        trimCode: build.trimCode,
+      };
       if (m.intent === 'options') return call(t('getVehicleOptions', input));
       if (m.intent === 'features') return call(t('getVehicleFeatures', input));
       if (m.intent === 'price') return call(t('calculateVehiclePrice', input));
@@ -243,7 +282,18 @@ function compose(m: Memory, steps: Step[]): Decision['text'] {
     : steps.map(describe).filter(Boolean).join('\n\n');
 
   const follow = followUp(m, last);
-  return [body || cannotHelp(), follow].filter(Boolean).join('\n\n');
+  return [preamble(m, last), body || cannotHelp(), follow].filter(Boolean).join('\n\n');
+}
+
+/** Said before the answer, where the answer alone would not address the question. */
+function preamble(m: Memory, last: Step): string {
+  if (last.name === 'getVehicleColours' && !last.isError) {
+    const asked = unofferedColour(m.said.at(-1) ?? '');
+    // Nine colours, none of them theirs. Saying so is the answer; the list is
+    // the useful part that follows it.
+    if (asked) return `We do not offer a ${asked} on that one. Here is what we do:`;
+  }
+  return '';
 }
 
 /** One next step, offered only where there is an obvious one. */
@@ -397,8 +447,22 @@ function callbackTurn(m: Memory): Decision {
 
 function tradeInTurn(m: Memory): Decision {
   const vehicle = m.tradeIn;
-  if (!vehicle.year || !vehicle.make || !vehicle.model || vehicle.mileageKm === undefined) {
-    return say(`Happy to get that appraised. ${ASKS.vehicle}`);
+
+  // Asked for only what is still missing. Re-asking for the year of a car they
+  // have already named is how a form feels, and they have already typed it.
+  const missingDetails = [
+    vehicle.year ? '' : 'the year',
+    vehicle.make && vehicle.model ? '' : 'the make and model',
+    vehicle.mileageKm === undefined ? 'the rough mileage' : '',
+  ].filter(Boolean);
+
+  if (missingDetails.length > 0) {
+    const known = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
+    return say(
+      known
+        ? `${ASKS.appraisal} What is ${sentenceList(missingDetails)} of the ${known}?`
+        : `${ASKS.appraisal} ${ASKS.vehicle}`,
+    );
   }
   if (!vehicle.condition) return say(ASKS.condition);
 
@@ -480,10 +544,73 @@ function cannotHelp(): string {
   );
 }
 
+/**
+ * A model name that is not in the range.
+ *
+ * Two conditions, both required. The message has to be asking about a car —
+ * otherwise "can I get it by Q3" is answered with a lecture about the Q3 we do
+ * not build — and the token has to look like a model designation: a letter or
+ * two followed by digits. "80k" and "2026" are not model names, so they start
+ * with a digit and never reach here.
+ */
+function inventedModel(m: Memory, digest: Digest): string | undefined {
+  const said = m.said.at(-1) ?? '';
+
+  const askingAboutACar =
+    /\b(model|car|vehicle|suv|sedan|tell me about|do you (make|sell|have|do|build)|how much is|in stock|interested in|looking at)\b/i.test(
+      said,
+    ) || said.toLowerCase().includes(digest.brandName.toLowerCase());
+  if (!askingAboutACar) return undefined;
+
+  const known = new Set(digest.models.map((model) => model.slug.toLowerCase()));
+  const tokens = said.match(/\b[A-Za-z]{1,3}\d{1,3}\b/g) ?? [];
+
+  // If they named a car we do build, the other token is something else — a
+  // quarter, a trim, a number of seats — and not a model we should deny making.
+  if (tokens.some((token) => known.has(token.toLowerCase()))) return undefined;
+
+  return tokens.find(
+    (token) => !known.has(token.toLowerCase()) && !readsAsATimeframe(said, token),
+  );
+}
+
+/**
+ * "by Q3" is a deadline; "the Q4" is a car somebody else makes.
+ *
+ * Decided by what sits next to it rather than by banning the shape, because
+ * plenty of real models are a letter and a digit and denying we make one is
+ * exactly the answer a customer asking about a rival's car needs.
+ */
+function readsAsATimeframe(said: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (
+    new RegExp(`\\b(by|in|before|after|until|during)\\s+${escaped}\\b`, 'i').test(said) ||
+    new RegExp(`\\b${escaped}\\s+(of\\s+)?(next|this|last)\\s+year`, 'i').test(said) ||
+    new RegExp(`\\b${escaped}\\s+20\\d\\d\\b`, 'i').test(said)
+  );
+}
+
+/**
+ * "an X9", not "a X9".
+ *
+ * By how the letter is said, not how it is spelled: F, H, L, M, N, R, S and X
+ * all begin with a vowel sound when read aloud, which is how a customer reads
+ * a model name.
+ */
+function article(token: string): string {
+  return /^[AEFHILMNORSX]/i.test(token) ? 'an' : 'a';
+}
+
+/**
+ * The range, by name and segment — and deliberately without prices.
+ *
+ * The digest is routing information, not an answer (docs/00-architecture.md
+ * §4). Quoting its prices would be stating a figure no tool returned in this
+ * conversation, which is the one thing the grounding rule forbids. The price
+ * tools are one question away.
+ */
 function range(digest: Digest): string {
-  return digest.models
-    .map((model) => `- **${model.name}** — ${model.segment}, from ${model.priceFrom}`)
-    .join('\n');
+  return digest.models.map((model) => `- **${model.name}** — ${model.segment}`).join('\n');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -509,31 +636,49 @@ interface TrimRow {
  * builds. The pairing is checked here so the price tool is never asked for an
  * impossible combination.
  */
-function resolveBuild(
-  m: Memory,
-  steps: Step[],
-): { powertrainCode: string; trimCode: string } | undefined {
+type Build =
+  | { kind: 'build'; powertrainCode: string; trimCode: string }
+  | { kind: 'not-offered'; trim: TrimRow; powertrain: PowertrainRow; alternatives: string[] }
+  | { kind: 'unknown' };
+
+function resolveBuild(m: Memory, steps: Step[]): Build {
   const powertrains = rowsOf<PowertrainRow>(steps, 'getVehiclePowertrains', 'powertrains');
   const trims = rowsOf<TrimRow>(steps, 'getVehicleTrims', 'trims');
-  if (powertrains.length === 0 || trims.length === 0) return undefined;
+  if (powertrains.length === 0 || trims.length === 0) return { kind: 'unknown' };
 
   let trim = m.trimCode ? trims.find((row) => row.code === m.trimCode) : undefined;
   let powertrain = m.powertrainHint ? matchPowertrain(powertrains, m.powertrainHint) : undefined;
 
-  if (trim && (!powertrain || !powertrain.offeredWithTrims.includes(trim.code))) {
-    // The trim the customer named wins; the engine moves to one offered with it.
-    powertrain = powertrains.find((row) => row.offeredWithTrims.includes(trim!.code)) ?? powertrain;
+  // Both named, and not built together. This is told, not fixed.
+  //
+  // Substituting a compatible engine would produce a real price for a real
+  // car — just not the one they asked about. They would learn the figure and
+  // not the fact that their combination does not exist, which is the thing
+  // they actually need (spec §8, INVALID_COMBINATION).
+  if (trim && powertrain && !powertrain.offeredWithTrims.includes(trim.code)) {
+    return {
+      kind: 'not-offered',
+      trim,
+      powertrain,
+      alternatives: powertrains
+        .filter((row) => row.offeredWithTrims.includes(trim!.code))
+        .map((row) => row.name),
+    };
+  }
+
+  // Only one named, or neither: filling the other in is a default, not a
+  // substitution, and the price tool's own summary names what it priced.
+  if (trim && !powertrain) {
+    powertrain = powertrains.find((row) => row.offeredWithTrims.includes(trim!.code));
   }
   powertrain ??= powertrains[0]!;
   trim ??= trims.find((row) => powertrain!.offeredWithTrims.includes(row.code)) ?? trims[0]!;
 
   if (!powertrain.offeredWithTrims.includes(trim.code)) {
-    const fallback = powertrains.find((row) => row.offeredWithTrims.includes(trim!.code));
-    if (fallback) powertrain = fallback;
-    else trim = trims.find((row) => powertrain!.offeredWithTrims.includes(row.code)) ?? trim;
+    trim = trims.find((row) => powertrain!.offeredWithTrims.includes(row.code)) ?? trim;
   }
 
-  return { powertrainCode: powertrain.code, trimCode: trim.code };
+  return { kind: 'build', powertrainCode: powertrain.code, trimCode: trim.code };
 }
 
 function matchPowertrain(rows: PowertrainRow[], hint: string): PowertrainRow | undefined {
