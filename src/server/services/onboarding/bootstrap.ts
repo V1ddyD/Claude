@@ -3,10 +3,8 @@ import postgres from 'postgres';
 import { migrate } from '@/server/db/migrate';
 import { EMBEDDED_MIGRATIONS } from '@/server/db/migrations.generated';
 import { env } from '@/server/config/env';
-import { seedSinclair, SINCLAIR_TENANT_ID } from '../../../../db/seeds/sinclair';
-import { SINCLAIR_CATALOGUE } from '../../../../db/seeds/catalogue';
-import { writeModel } from '../../../../db/seeds/catalogue-writer';
-import { seedInventory } from '../../../../db/seeds/inventory';
+import { DEMONSTRATION_SEED_SQL, SEED_ROW_COUNT } from '@/server/db/seed.generated';
+import { SINCLAIR_TENANT_ID } from '../../../../db/seeds/sinclair';
 
 /**
  * Bringing a hosted demonstration database up from empty.
@@ -28,8 +26,8 @@ import { seedInventory } from '../../../../db/seeds/inventory';
 export interface BootstrapReport {
   models: number;
   inventoryUnits: number;
-  /** How many units this call created. Zero on a second call. */
-  seededNow: number;
+  /** True when the dealership was written by this call. */
+  seededNow: boolean;
   host: string | null;
 }
 
@@ -42,6 +40,10 @@ export interface BootstrapReport {
 function ownerUrl(): string | undefined {
   return env.DATABASE_ADMIN_URL ?? env.DATABASE_URL;
 }
+
+/** Every model in the catalogue this seed carries. */
+const EXPECTED_MODELS = (DEMONSTRATION_SEED_SQL.match(/^INSERT INTO public\.vehicle_models /gm) ?? [])
+  .length;
 
 export async function bootstrapDemonstration(
   options: { hostname?: string } = {},
@@ -58,18 +60,28 @@ export async function bootstrapDemonstration(
     // Seeding writes tenant rows directly and must bypass the tenant GUC,
     // which is not set for a tenant that does not exist yet.
     await sql`SET row_security = off`;
-    await seedSinclair(sql);
 
-    const [existing] = await sql<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM vehicle_models WHERE tenant_id = ${SINCLAIR_TENANT_ID}
+    const [before] = await sql<{ models: number; units: number }[]>`
+      SELECT (SELECT count(*)::int FROM vehicle_models WHERE tenant_id = ${SINCLAIR_TENANT_ID}) AS models,
+             (SELECT count(*)::int FROM inventory_units WHERE tenant_id = ${SINCLAIR_TENANT_ID}) AS units
     `;
 
-    let seededNow = 0;
-    if (existing!.count === 0) {
-      for (const model of SINCLAIR_CATALOGUE) {
-        await writeModel(sql, SINCLAIR_TENANT_ID, model);
-      }
-      seededNow = await seedInventory(sql, SINCLAIR_TENANT_ID);
+    const complete = before!.models >= EXPECTED_MODELS && before!.units > 0;
+    let seededNow = false;
+
+    if (!complete) {
+      // An incomplete catalogue is replaced rather than topped up. A half
+      // written dealership — a model with no configurations, a configuration
+      // with no stock — is worse than none: pages half render and the
+      // assistant offers cars it cannot price.
+      //
+      // Only reachable while the demonstration is incomplete, so a later call
+      // never discards enquiries that visitors have since left.
+      await sql.unsafe(`
+        TRUNCATE TABLE tenants CASCADE;
+        ${DEMONSTRATION_SEED_SQL}
+      `);
+      seededNow = true;
     }
 
     // The last thing a deployment needs: an unregistered hostname
@@ -87,6 +99,13 @@ export async function bootstrapDemonstration(
       SELECT (SELECT count(*)::int FROM vehicle_models WHERE tenant_id = ${SINCLAIR_TENANT_ID}) AS models,
              (SELECT count(*)::int FROM inventory_units WHERE tenant_id = ${SINCLAIR_TENANT_ID}) AS units
     `;
+
+    if (counts!.models < EXPECTED_MODELS) {
+      throw new Error(
+        `Seed incomplete: ${counts!.models} of ${EXPECTED_MODELS} models, ` +
+          `${SEED_ROW_COUNT} rows expected.`,
+      );
+    }
 
     return { models: counts!.models, inventoryUnits: counts!.units, seededNow, host };
   } finally {

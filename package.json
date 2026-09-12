@@ -20,6 +20,7 @@
     "db:reset": "tsx db/seeds/reset.ts",
     "domain:add": "tsx --import ./scripts/server-only-shim.mjs scripts/add-domain.ts",
     "migrations:embed": "tsx scripts/embed-migrations.ts",
+    "seed:embed": "tsx scripts/embed-seed.ts",
     "eval": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts",
     "eval:rules": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --rules",
     "eval:live": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --live",

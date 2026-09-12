@@ -42,9 +42,26 @@ async function newCustomer(name: string): Promise<string> {
 }
 
 /** A slot far enough out that no other test has taken it. */
+/**
+ * A search window `daysAhead` days out, anchored to midnight and three days
+ * wide.
+ *
+ * Both details matter. Anchored, because a window that started at "now plus N
+ * days" inherited the time of day the suite happened to run: at four in the
+ * afternoon a one-day window sat almost entirely outside opening hours, so
+ * these tests passed in the morning and failed in the evening for a reason
+ * that had nothing to do with booking. Three days wide, because a dealership
+ * closes on Sundays and one day out of seven is not guaranteed to be open at
+ * all.
+ *
+ * Each test still takes the FIRST slot offered, so widening the window does
+ * not weaken what is being asserted — only how reliably a slot exists to
+ * assert about.
+ */
 function windowFrom(daysAhead: number) {
   const from = new Date(Date.now() + daysAhead * 864e5);
-  return { from, to: new Date(from.getTime() + 864e5) };
+  from.setUTCHours(0, 0, 0, 0);
+  return { from, to: new Date(from.getTime() + 3 * 864e5) };
 }
 
 beforeAll(async () => {

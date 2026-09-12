@@ -1,0 +1,157 @@
+/**
+ * Embed the demonstration dealership as a single SQL script.
+ *
+ *   DATABASE_ADMIN_URL=... npm run seed:embed
+ *
+ * Why a script rather than the seeding code: the hosted demonstration's
+ * database is in another region from the functions that reach it, and the
+ * seeding code issues several hundred small statements. At a fifth of a second
+ * each that is minutes, and a serverless function is killed after thirty
+ * seconds — the first attempt wrote one model out of ten before dying.
+ *
+ * As one statement it is a single round trip.
+ *
+ * Generated from a real seeded database rather than written by hand: the
+ * catalogue is 10 models, 36 configurations and 86 cars, and a hand-maintained
+ * copy of that is wrong within a week.
+ */
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+const TARGET = 'src/server/db/seed.generated.ts';
+
+const EXCLUDED = [
+  // Populated by the schema migrations themselves — the permission matrix and
+  // the inventory state machine are part of the schema, not of a dealership.
+  // Dumping them too would re-insert rows that already exist.
+  'role_permissions', 'inventory_transitions',
+
+  'schema_migrations', 'visitors', 'conversations', 'messages', 'customers',
+  'leads', 'lead_signals', 'lead_events', 'staff_notes', 'appointments',
+  'appointment_resources', 'tickets', 'email_messages', 'job_queue',
+  'audit_logs', 'follow_up_tasks', 'notifications', 'trade_in_requests',
+  'finance_requests', 'saved_builds', 'rate_limit_counters', 'access_tokens',
+  'ai_usage',
+];
+
+
+/**
+ * The tables to seed, ordered so every row's references already exist.
+ *
+ * Read out of the database rather than listed here: a catalogue table added
+ * next month would otherwise be silently left out of the demonstration, and
+ * nothing would fail until someone clicked on it.
+ */
+function seedTablesInOrder(adminUrl: string): string[] {
+  const query = `
+    SELECT c.relname AS table_name,
+           coalesce(array_agg(DISTINCT f.relname) FILTER (WHERE f.relname IS NOT NULL), '{}') AS depends_on
+    FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_constraint con
+        ON con.conrelid = c.oid AND con.contype = 'f'
+      LEFT JOIN pg_class f
+        ON f.oid = con.confrelid AND f.oid <> c.oid
+    WHERE n.nspname = 'public' AND c.relkind = 'r'
+    GROUP BY c.relname
+    ORDER BY c.relname
+  `;
+
+  const raw = execFileSync('psql', [adminUrl, '-tAF', '\t', '-c', query], {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  });
+
+  const dependencies = new Map<string, string[]>();
+  for (const line of raw.split('\n').filter(Boolean)) {
+    const [table, deps] = line.split('\t');
+    if (!table || EXCLUDED.includes(table)) continue;
+    dependencies.set(
+      table,
+      (deps ?? '{}').replace(/^\{|\}$/g, '').split(',').filter(Boolean),
+    );
+  }
+
+  // Depth-first, so a table is emitted only once everything it points at has
+  // been. Cycles are impossible in this schema and would simply be emitted in
+  // discovery order if one appeared.
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+
+  const visit = (table: string) => {
+    if (seen.has(table)) return;
+    seen.add(table);
+    for (const dependency of dependencies.get(table) ?? []) {
+      if (dependencies.has(dependency)) visit(dependency);
+    }
+    ordered.push(table);
+  };
+
+  for (const table of dependencies.keys()) visit(table);
+  return ordered;
+}
+
+/** psql meta-commands are not SQL, and the migration runner is not psql. */
+function stripMetaCommands(sql: string): string {
+  return sql
+    .split('\n')
+    .filter((line) => !/^\\(restrict|unrestrict|connect|encoding)\b/.test(line))
+    .join('\n');
+}
+
+function dumpInDependencyOrder(adminUrl: string): string {
+  const chunks: string[] = [];
+
+  for (const table of seedTablesInOrder(adminUrl)) {
+    const chunk = execFileSync(
+      'pg_dump',
+      [
+        adminUrl, '--data-only', '--inserts', '--no-owner', '--no-privileges',
+        '--table', `public.${table}`,
+      ],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+
+    const inserts = stripMetaCommands(chunk)
+      .split('\n')
+      .filter((line) => line.startsWith('INSERT INTO') || line.startsWith('SELECT pg_catalog.setval'))
+      .join('\n');
+
+    if (inserts.trim().length > 0) chunks.push(`-- ${table}\n${inserts}`);
+  }
+
+  return chunks.join('\n\n');
+}
+
+function main() {
+  const adminUrl = process.env.DATABASE_ADMIN_URL;
+  if (!adminUrl) {
+    console.error(
+      'DATABASE_ADMIN_URL must point at a freshly migrated and seeded database.\n' +
+        'The script is dumped from it.',
+    );
+    process.exit(1);
+  }
+
+  const sql = dumpInDependencyOrder(adminUrl);
+  const inserts = (sql.match(/^INSERT INTO/gm) ?? []).length;
+
+  writeFileSync(
+    TARGET,
+    `/**
+ * Generated by scripts/embed-seed.ts. Do not edit.
+ *
+ * The demonstration dealership — catalogue, staff, hours, stock and rules — as
+ * one SQL script, so a serverless function can apply it in a single round trip.
+ * Regenerate with \`npm run seed:embed\`.
+ */
+export const SEED_ROW_COUNT = ${inserts};
+
+export const DEMONSTRATION_SEED_SQL = ${JSON.stringify(sql)};
+`,
+  );
+
+  console.log(`Embedded a seed of ${inserts} rows into ${TARGET}.`);
+}
+
+main();
