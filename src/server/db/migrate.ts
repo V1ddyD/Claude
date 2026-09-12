@@ -18,7 +18,23 @@ import { loadEnvFile } from './../config/load-env-file';
 
 const MIGRATIONS_DIR = join(process.cwd(), 'db', 'migrations');
 
-export async function migrate(connectionString: string, opts: { quiet?: boolean } = {}) {
+export interface MigrationSource {
+  name: string;
+  sql: string;
+}
+
+/**
+ * Where the migrations come from.
+ *
+ * The CLI reads `db/migrations` from disk, which is the source of truth. A
+ * serverless function cannot — its working directory is not the repository —
+ * so it passes the compiled-in copy instead. Same runner, same tracking table,
+ * same immutability check either way.
+ */
+export async function migrate(
+  connectionString: string,
+  opts: { quiet?: boolean; migrations?: MigrationSource[] } = {},
+) {
   const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
   const log = (msg: string) => {
     if (!opts.quiet) console.log(msg);
@@ -33,14 +49,21 @@ export async function migrate(connectionString: string, opts: { quiet?: boolean 
       )
     `;
 
-    const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
+    const sources =
+      opts.migrations ??
+      (await Promise.all(
+        (await readdir(MIGRATIONS_DIR))
+          .filter((f) => f.endsWith('.sql'))
+          .sort()
+          .map(async (name) => ({ name, sql: await readFile(join(MIGRATIONS_DIR, name), 'utf8') })),
+      ));
+
     const applied = await sql<{ name: string; checksum: string }[]>`
       SELECT name, checksum FROM schema_migrations
     `;
     const appliedByName = new Map(applied.map((r) => [r.name, r.checksum]));
 
-    for (const file of files) {
-      const body = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
+    for (const { name: file, sql: body } of sources) {
       const checksum = createHash('sha256').update(body).digest('hex').slice(0, 16);
       const previous = appliedByName.get(file);
 
@@ -63,7 +86,7 @@ export async function migrate(connectionString: string, opts: { quiet?: boolean 
       });
     }
 
-    log(`  up to date (${files.length} migration${files.length === 1 ? '' : 's'})`);
+    log(`  up to date (${sources.length} migration${sources.length === 1 ? '' : 's'})`);
   } finally {
     await sql.end({ timeout: 5 });
   }

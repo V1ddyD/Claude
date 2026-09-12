@@ -19,7 +19,7 @@
     "db:seed": "tsx db/seeds/index.ts",
     "db:reset": "tsx db/seeds/reset.ts",
     "domain:add": "tsx --import ./scripts/server-only-shim.mjs scripts/add-domain.ts",
-    "netlify:migrations": "tsx scripts/build-netlify-migrations.ts",
+    "migrations:embed": "tsx scripts/embed-migrations.ts",
     "eval": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts",
     "eval:rules": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --rules",
     "eval:live": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --live",

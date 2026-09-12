@@ -109,6 +109,10 @@ export default [
       // why — the rule exists so a fourth one cannot appear unnoticed.
       'src/server/db/control-plane.ts',
       'src/server/auth/dev-directory.ts',
+      // Migrating and seeding a managed database the application is the only
+      // thing that can reach. Runs as the owner because migrations create
+      // roles and policies and seeding precedes any tenant context.
+      'src/server/services/onboarding/bootstrap.ts',
       // Creating a tenant necessarily precedes a tenant context — the row every
       // other query is scoped to does not exist yet.
       'src/server/services/onboarding/index.ts',
