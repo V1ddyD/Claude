@@ -14,6 +14,11 @@
   # site down; this one only compiles.
   NODE_VERSION = "20"
 
+# `@netlify/database` is a dependency for one reason: its presence is what makes
+# Netlify provision a Postgres for this site. The application does not import
+# it — it talks to the database through postgres.js and DATABASE_URL, so the
+# same code runs on any Postgres anywhere.
+
 [functions]
   # postgres.js and the Anthropic SDK are Node libraries, not edge ones.
   node_bundler = "esbuild"
