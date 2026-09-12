@@ -35,6 +35,20 @@
 # it — it talks to the database through postgres.js and DATABASE_URL, so the
 # same code runs on any Postgres anywhere.
 
+# Run the functions next to the database.
+#
+# The database is in ap-southeast-1 and functions default to us-east-2, which
+# makes every query a round trip of roughly a fifth of a second. Reads survive
+# that; committing a test drive — customer, lead, signals, appointment,
+# resource holds, ticket, queued email, audit rows, one transaction — does not,
+# and died on the thirty-second function limit.
+#
+# Co-locating is the fix. Moving the queries themselves would mean rewriting
+# the booking transaction around a latency budget, which is the wrong thing to
+# design a dealership's booking around.
+[functions]
+  region = "ap-southeast-1"
+
 # Drains the job queue: queued email, follow-up evaluation, hold expiry,
 # retention and rate-limit sweeping. Authenticated by CRON_SECRET, so the
 # endpoint is not a public way to run arbitrary queued work.
