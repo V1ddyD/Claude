@@ -26,9 +26,14 @@ export async function GET() {
 
   const report = {
     ok: false,
-    assistant: features.aiProvider,
-    email: features.email ? 'configured' : 'not configured',
-    demo: features.demoPortal,
+    // Every one of these reads validated configuration, which THROWS when the
+    // configuration is incomplete — and incomplete configuration is the exact
+    // case this endpoint exists to report. An unhandled throw here returns 500
+    // with an empty body, which is indistinguishable from the failure it was
+    // meant to explain. So each is read defensively.
+    assistant: tolerate(() => features.aiProvider, 'unknown'),
+    email: tolerate(() => (features.email ? 'configured' : 'not configured'), 'unknown'),
+    demo: tolerate(() => features.demoPortal, false),
     database: {
       configured: hasDatabaseUrl(),
       reachable: false,
@@ -91,9 +96,14 @@ export async function GET() {
  * configuration would throw.
  */
 function hasDatabaseUrl(): boolean {
+  return tolerate(() => Boolean(env.DATABASE_URL), false);
+}
+
+/** Reading configuration that may refuse to load, without becoming a 500. */
+function tolerate<T>(read: () => T, fallback: T): T {
   try {
-    return Boolean(env.DATABASE_URL);
+    return read();
   } catch {
-    return false;
+    return fallback;
   }
 }
