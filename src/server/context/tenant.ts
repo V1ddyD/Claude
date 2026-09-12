@@ -27,7 +27,24 @@ export interface ResolvedTenant {
  */
 
 const cache = new Map<string, { tenant: ResolvedTenant; expires: number }>();
+/**
+ * The same rows, keyed by id.
+ *
+ * A chat turn already knows its tenant id and only wants the brand name,
+ * timezone and currency to build a reply. Fetching that again is a whole
+ * transaction — a BEGIN, the tenant context, the select and a COMMIT — which
+ * is four network round trips to re-read something that has not changed. Both
+ * caches hold the same immutable-for-a-minute row and are cleared together.
+ */
+const byId = new Map<string, { tenant: ResolvedTenant; expires: number }>();
 const TTL_MS = 60_000;
+
+function remember(tenant: ResolvedTenant, hostname?: string): ResolvedTenant {
+  const expires = Date.now() + TTL_MS;
+  if (hostname) cache.set(hostname, { tenant, expires });
+  byId.set(tenant.id, { tenant, expires });
+  return tenant;
+}
 
 function normaliseHost(host: string): string {
   return host.toLowerCase().split(':')[0] ?? '';
@@ -81,8 +98,7 @@ export async function resolveTenantByHost(host: string | null): Promise<Resolved
   }
 
   const { status: _status, ...resolved } = tenant;
-  cache.set(hostname, { tenant: resolved, expires: Date.now() + TTL_MS });
-  return resolved;
+  return remember(resolved, hostname);
 }
 
 async function resolveTenantIdForHost(hostname: string): Promise<string | null> {
@@ -111,6 +127,9 @@ async function resolveTenantIdForHost(hostname: string): Promise<string | null> 
  * ever return the caller's own dealership.
  */
 export async function getTenantById(tenantId: string): Promise<ResolvedTenant> {
+  const cached = byId.get(tenantId);
+  if (cached && cached.expires > Date.now()) return cached.tenant;
+
   const rows = await withTenant(tenantId, (db) =>
     db
       .select({
@@ -133,13 +152,19 @@ export async function getTenantById(tenantId: string): Promise<ResolvedTenant> {
       internal: { tenantId },
     });
   }
-  return tenant;
+  return remember(tenant);
 }
 
 /** Clears the resolution cache. Used by tests and by tenant settings writes. */
 export function invalidateTenantCache(hostname?: string): void {
-  if (hostname) cache.delete(normaliseHost(hostname));
-  else cache.clear();
+  if (hostname) {
+    const key = normaliseHost(hostname);
+    byId.delete(cache.get(key)?.tenant.id ?? '');
+    cache.delete(key);
+  } else {
+    cache.clear();
+    byId.clear();
+  }
 }
 
 /** Reads the tenant id RLS is currently enforcing. Used by the isolation tests. */

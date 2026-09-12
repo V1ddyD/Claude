@@ -147,19 +147,27 @@ export async function respondToMessage(params: {
   const registry = toolRegistry();
 
   return withTenant(params.tenantId, async (db) => {
-    await appendMessage(db, params.conversationId, { role: 'user', content: params.userMessage });
+    // Three independent reads, issued together so the driver pipelines them
+    // into one round trip instead of three. See `writeMessages` for why the
+    // customer's own message is not written before them.
+    const [{ history, nextSeq }, pinned, catalogueDigest] = await Promise.all([
+      loadHistory(db, params.conversationId),
+      // What the customer has already established, so they are never asked
+      // twice and an unqualified "the Premium" resolves to the car they are
+      // looking at.
+      buildPinnedFacts(db, params.conversationId),
+      buildCatalogueDigest(db, tenant),
+    ]);
 
-    const history = await loadHistory(db, params.conversationId);
-    // What the customer has already established, so they are never asked twice
-    // and an unqualified "the Premium" resolves to the car they are looking at.
-    const pinned = await buildPinnedFacts(db, params.conversationId);
+    const pending = new MessageBuffer(nextSeq);
+    pending.add({ role: 'user', content: params.userMessage });
 
     const system = buildSystemPrompt({
       brandName: tenant.brandName,
       timezone: tenant.timezone,
       locale: tenant.locale,
       currency: tenant.currency,
-      catalogueDigest: await buildCatalogueDigest(db, tenant),
+      catalogueDigest,
       responseSlaHours: 1,
       knownFacts: pinned.facts,
       earlier: pinned.earlier,
@@ -184,7 +192,10 @@ export async function respondToMessage(params: {
       db,
     };
 
-    const conversation: Anthropic.MessageParam[] = history;
+    const conversation: Anthropic.MessageParam[] = [
+      ...history,
+      { role: 'user', content: params.userMessage },
+    ];
     const toolsUsed: string[] = [];
     let writes = 0;
     let finalText = '';
@@ -252,7 +263,7 @@ export async function respondToMessage(params: {
           content: JSON.stringify(outcome.ok ? outcome.result : outcome.error),
         });
 
-        await appendMessage(db, params.conversationId, {
+        pending.add({
           role: 'tool',
           toolName: use.name,
           toolInput: use.input,
@@ -269,11 +280,23 @@ export async function respondToMessage(params: {
       throw new AppError('DEPENDENCY_UNAVAILABLE', 'I could not complete that just now.');
     }
 
-    await appendMessage(db, params.conversationId, { role: 'assistant', content: finalText });
-    await db
-      .update(conversations)
-      .set({ lastMessageAt: sql`now()` })
-      .where(and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, params.conversationId)));
+    pending.add({ role: 'assistant', content: finalText });
+
+    // The turn's whole transcript in one insert, issued together with the
+    // conversation's timestamp. Both are writes to different tables with no
+    // dependency between them, so they cost one round trip, not two.
+    await Promise.all([
+      writeMessages(db, params.conversationId, pending.entries),
+      db
+        .update(conversations)
+        .set({ lastMessageAt: sql`now()` })
+        .where(
+          and(
+            eq(conversations.tenantId, db.tenantId),
+            eq(conversations.id, params.conversationId),
+          ),
+        ),
+    ]);
 
     return {
       text: finalText,
@@ -314,34 +337,62 @@ function toReceipt(toolName: string, result: unknown): Receipt | undefined {
   };
 }
 
-async function appendMessage(
+interface PendingMessage {
+  seq: number;
+  role: 'user' | 'assistant' | 'tool';
+  content?: string;
+  toolName?: string;
+  toolInput?: unknown;
+  toolResult?: unknown;
+}
+
+/**
+ * The turn's transcript, held until the end of the turn.
+ *
+ * It used to be written a row at a time, and each row cost two round trips: one
+ * to read `max(seq) + 1` and one to insert. A turn that calls three tools wrote
+ * five rows, which was ten round trips spent on bookkeeping the customer never
+ * sees — and the read-then-insert was a race besides, because two messages in
+ * the same conversation could read the same maximum.
+ *
+ * Sequence numbers are handed out from the count already loaded with the
+ * history, so there is no extra read, and the rows go in as one statement at
+ * the end of the turn. Nothing within a turn reads its own transcript back,
+ * and the whole turn is one transaction either way, so holding the rows
+ * changes no durability guarantee: they commit together or not at all.
+ */
+class MessageBuffer {
+  readonly entries: PendingMessage[] = [];
+  private seq: number;
+
+  constructor(nextSeq: number) {
+    this.seq = nextSeq;
+  }
+
+  add(message: Omit<PendingMessage, 'seq'>): void {
+    this.entries.push({ ...message, seq: this.seq++ });
+  }
+}
+
+async function writeMessages(
   db: TenantDb,
   conversationId: string,
-  message: {
-    role: 'user' | 'assistant' | 'tool';
-    content?: string;
-    toolName?: string;
-    toolInput?: unknown;
-    toolResult?: unknown;
-  },
+  entries: PendingMessage[],
 ): Promise<void> {
-  const next = await db
-    .select({ seq: sql<number>`coalesce(max(${messagesTable.seq}), 0) + 1` })
-    .from(messagesTable)
-    .where(
-      and(eq(messagesTable.tenantId, db.tenantId), eq(messagesTable.conversationId, conversationId)),
-    );
+  if (entries.length === 0) return;
 
-  await db.insert(messagesTable).values({
-    tenantId: db.tenantId,
-    conversationId,
-    seq: Number(next[0]?.seq ?? 1),
-    role: message.role,
-    content: message.content ?? null,
-    toolName: message.toolName ?? null,
-    toolInput: (message.toolInput ?? null) as never,
-    toolResult: (message.toolResult ?? null) as never,
-  });
+  await db.insert(messagesTable).values(
+    entries.map((message) => ({
+      tenantId: db.tenantId,
+      conversationId,
+      seq: message.seq,
+      role: message.role,
+      content: message.content ?? null,
+      toolName: message.toolName ?? null,
+      toolInput: (message.toolInput ?? null) as never,
+      toolResult: (message.toolResult ?? null) as never,
+    })),
+  );
 }
 
 /**
@@ -354,22 +405,31 @@ async function appendMessage(
 async function loadHistory(
   db: TenantDb,
   conversationId: string,
-): Promise<Anthropic.MessageParam[]> {
+): Promise<{ history: Anthropic.MessageParam[]; nextSeq: number }> {
   const rows = await db
-    .select({ role: messagesTable.role, content: messagesTable.content })
+    .select({
+      seq: messagesTable.seq,
+      role: messagesTable.role,
+      content: messagesTable.content,
+    })
     .from(messagesTable)
     .where(
       and(eq(messagesTable.tenantId, db.tenantId), eq(messagesTable.conversationId, conversationId)),
     )
     .orderBy(asc(messagesTable.seq));
 
-  return rows
+  const history = rows
     .filter((r) => r.role !== 'tool' && r.content)
     .slice(-HISTORY_TURNS * 2)
     .map((r) => ({
       role: r.role === 'assistant' ? ('assistant' as const) : ('user' as const),
       content: r.content!,
     }));
+
+  // Every row for the conversation is read, so the last sequence number is
+  // exact — this turn's rows can be numbered without asking the database again.
+  const last = rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : 0;
+  return { history, nextSeq: last + 1 };
 }
 
 /**

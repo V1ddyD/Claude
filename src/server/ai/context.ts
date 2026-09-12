@@ -45,46 +45,55 @@ const CARRIED: Record<string, (value: unknown) => string | null> = {
   // repeat them back, and a prompt is the wrong place to carry contact details.
 };
 
+/**
+ * Three independent reads, issued together.
+ *
+ * They are not awaited one at a time: the driver pipelines statements that are
+ * in flight at once, so this costs one network round trip rather than three.
+ * On a deployment whose database is a continent away that is the difference
+ * between a turn that answers and a turn that times out.
+ *
+ * The signals read joins through `leads` for the same reason — finding the
+ * lead id first and then its signals is two round trips to answer one
+ * question.
+ */
 export async function buildPinnedFacts(
   db: TenantDb,
   conversationId: string,
 ): Promise<PinnedFacts> {
-  const subject = await findCurrentSubject(db, conversationId);
-  const facts: string[] = [];
-  const seen = new Set<string>();
-
-  const [conversation] = await db
-    .select({ rollingSummary: conversations.rollingSummary })
-    .from(conversations)
-    .where(and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, conversationId)))
-    .limit(1);
-
-  const leadRows = await db
-    .select({ id: leads.id })
-    .from(leads)
-    .where(and(eq(leads.tenantId, db.tenantId), eq(leads.conversationId, conversationId)))
-    .limit(1);
-
-  if (leadRows[0]) {
-    const signals = await db
+  const [subject, [conversation], signals] = await Promise.all([
+    findCurrentSubject(db, conversationId),
+    db
+      .select({ rollingSummary: conversations.rollingSummary })
+      .from(conversations)
+      .where(and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, conversationId)))
+      .limit(1),
+    db
       .select({ field: leadSignals.field, value: leadSignals.value })
       .from(leadSignals)
+      .innerJoin(
+        leads,
+        and(eq(leads.id, leadSignals.leadId), eq(leads.tenantId, leadSignals.tenantId)),
+      )
       .where(
         and(
           eq(leadSignals.tenantId, db.tenantId),
-          eq(leadSignals.leadId, leadRows[0].id),
+          eq(leads.conversationId, conversationId),
           isNull(leadSignals.supersededAt),
         ),
-      );
+      ),
+  ]);
 
-    for (const signal of signals) {
-      const render = CARRIED[signal.field];
-      if (!render) continue;
-      const text = render(signal.value);
-      if (text && !seen.has(text)) {
-        seen.add(text);
-        facts.push(text);
-      }
+  const facts: string[] = [];
+  const seen = new Set<string>();
+
+  for (const signal of signals) {
+    const render = CARRIED[signal.field];
+    if (!render) continue;
+    const text = render(signal.value);
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      facts.push(text);
     }
   }
 

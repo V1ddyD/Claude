@@ -122,7 +122,7 @@ function freeSlotsFor(
 }
 
 async function findEligibleResources(db: TenantDb, modelSlug?: string) {
-  const staff = await db
+  const staffQuery = db
     .select({ id: resources.id })
     .from(resources)
     .where(and(eq(resources.tenantId, db.tenantId), eq(resources.kind, 'staff'), eq(resources.isActive, true)));
@@ -144,7 +144,12 @@ async function findEligibleResources(db: TenantDb, modelSlug?: string) {
   ];
   if (modelSlug) conditions.push(eq(vehicleModels.slug, modelSlug));
 
-  const vehicles = await vehicleQuery.where(and(...conditions));
+  // Who can show a car and which cars can be shown: unrelated questions, so
+  // they are asked at the same time rather than one after the other.
+  const [staff, vehicles] = await Promise.all([
+    staffQuery,
+    vehicleQuery.where(and(...conditions)),
+  ]);
 
   return { staff: staff.map((s) => s.id), vehicles: vehicles.map((v) => v.id) };
 }
@@ -206,7 +211,16 @@ export async function createTestDrive(
   const settings = { ...DEFAULT_BOOKING_SETTINGS, ...tenant.settings };
   const endsAt = new Date(request.startsAt.getTime() + settings.slotMinutes * 60_000);
 
-  const eligible = await findEligibleResources(db, request.modelSlug);
+  // Who is free and who is booking: two independent reads, issued together.
+  const [eligible, customer] = await Promise.all([
+    findEligibleResources(db, request.modelSlug),
+    db
+      .select({ id: customers.id, fullName: customers.fullName, email: customers.email, consent: customers.contactConsent })
+      .from(customers)
+      .where(and(eq(customers.tenantId, db.tenantId), eq(customers.id, request.customerId)))
+      .limit(1),
+  ]);
+
   if (eligible.staff.length === 0 || eligible.vehicles.length === 0) {
     throw new AppError('CONFLICT', 'No test drive vehicle is available for that model.');
   }
@@ -222,12 +236,6 @@ export async function createTestDrive(
   const freeVehicle = eligible.vehicles.find((id) => !clashes(bookings.get(id), request.startsAt, endsAt));
 
   if (!freeStaff || !freeVehicle) throw slotTaken();
-
-  const customer = await db
-    .select({ id: customers.id, fullName: customers.fullName, email: customers.email, consent: customers.contactConsent })
-    .from(customers)
-    .where(and(eq(customers.tenantId, db.tenantId), eq(customers.id, request.customerId)))
-    .limit(1);
   if (!customer[0]) throw notFound('That customer');
 
   const leadId = await upsertLead(db, {
@@ -288,69 +296,80 @@ export async function createTestDrive(
     throw err;
   }
 
-  const vehicleLabel = await describeVehicle(db, freeVehicle);
-  const ticketNumber = await allocateTicketNumber(db, { prefix: tenant.ticketPrefix });
-
-  await db.insert(tickets).values({
-    tenantId: db.tenantId,
-    number: ticketNumber,
-    type: 'test_drive',
-    subject: `Test drive — ${vehicleLabel}`,
-    body: request.customerNotes ?? null,
-    customerId: request.customerId,
-    leadId,
-    appointmentId,
-    createdByType: 'ai',
-  });
+  const [vehicleLabel, ticketNumber] = await Promise.all([
+    describeVehicle(db, freeVehicle),
+    allocateTicketNumber(db, { prefix: tenant.ticketPrefix }),
+  ]);
 
   const formattedWhen = formatSlot({ startsAt: request.startsAt, endsAt }, tenant.timezone, tenant.locale);
+  const emailQueued = Boolean(customer[0].email && customer[0].consent);
 
-  // Queued in this transaction, so a rolled-back booking cannot send mail. The
-  // customer is told it is on its way, never that it has been delivered.
-  let emailQueued = false;
-  if (customer[0].email && customer[0].consent) {
-    await db.insert(emailMessages).values({
+  // Everything a booked test drive leaves behind: the ticket, the queued
+  // confirmation, the showroom notification, the lead's history, the
+  // appointment's status and the audit entry.
+  //
+  // Six writes to six tables, none of which reads another, so they are issued
+  // together rather than one at a time. They are still one transaction — the
+  // booking either leaves all of this behind or none of it. Issuing them
+  // sequentially cost six network round trips, which on a database in another
+  // region was most of the time a customer spent waiting for "Booked".
+  //
+  // The email is queued in this transaction, so a rolled-back booking cannot
+  // send mail. The customer is told it is on its way, never that it has been
+  // delivered.
+  await Promise.all([
+    db.insert(tickets).values({
       tenantId: db.tenantId,
-      templateKey: 'test_drive_confirmation',
-      toEmail: customer[0].email,
-      toName: customer[0].fullName,
-      subject: `Your test drive is booked — ${ticketNumber}`,
-      payload: {
-        ticketNumber, confirmationCode, vehicle: vehicleLabel, when: formattedWhen,
-      },
-      dedupeKey: `test_drive:${appointmentId}`,
-    });
-    emailQueued = true;
-  }
-
-  await db.insert(notifications).values({
-    tenantId: db.tenantId,
-    roleTarget: 'sales',
-    type: 'test_drive_booked',
-    title: `Test drive booked — ${vehicleLabel}`,
-    body: `${customer[0].fullName ?? 'A customer'} · ${formattedWhen} · ${ticketNumber}`,
-    linkPath: `/portal/leads/${leadId}`,
-  });
-
-  await recordLeadEvent(db, leadId, {
-    type: 'appointment_created',
-    actorType: 'ai',
-    summary: `Test drive booked for ${formattedWhen} (${ticketNumber}).`,
-    payload: { appointmentId, ticketNumber },
-  });
-
-  await db
-    .update(appointments)
-    .set({ status: 'scheduled' })
-    .where(and(eq(appointments.tenantId, db.tenantId), eq(appointments.id, appointmentId)));
-
-  await recordAudit(db, {
-    actor: { type: 'ai' },
-    action: 'appointment.created',
-    entityType: 'appointment',
-    entityId: appointmentId,
-    after: { startsAt: request.startsAt.toISOString(), ticketNumber, leadId },
-  });
+      number: ticketNumber,
+      type: 'test_drive',
+      subject: `Test drive — ${vehicleLabel}`,
+      body: request.customerNotes ?? null,
+      customerId: request.customerId,
+      leadId,
+      appointmentId,
+      createdByType: 'ai',
+    }),
+    ...(emailQueued
+      ? [
+          db.insert(emailMessages).values({
+            tenantId: db.tenantId,
+            templateKey: 'test_drive_confirmation',
+            toEmail: customer[0].email!,
+            toName: customer[0].fullName,
+            subject: `Your test drive is booked — ${ticketNumber}`,
+            payload: {
+              ticketNumber, confirmationCode, vehicle: vehicleLabel, when: formattedWhen,
+            },
+            dedupeKey: `test_drive:${appointmentId}`,
+          }),
+        ]
+      : []),
+    db.insert(notifications).values({
+      tenantId: db.tenantId,
+      roleTarget: 'sales',
+      type: 'test_drive_booked',
+      title: `Test drive booked — ${vehicleLabel}`,
+      body: `${customer[0].fullName ?? 'A customer'} · ${formattedWhen} · ${ticketNumber}`,
+      linkPath: `/portal/leads/${leadId}`,
+    }),
+    recordLeadEvent(db, leadId, {
+      type: 'appointment_created',
+      actorType: 'ai',
+      summary: `Test drive booked for ${formattedWhen} (${ticketNumber}).`,
+      payload: { appointmentId, ticketNumber },
+    }),
+    db
+      .update(appointments)
+      .set({ status: 'scheduled' })
+      .where(and(eq(appointments.tenantId, db.tenantId), eq(appointments.id, appointmentId))),
+    recordAudit(db, {
+      actor: { type: 'ai' },
+      action: 'appointment.created',
+      entityType: 'appointment',
+      entityId: appointmentId,
+      after: { startsAt: request.startsAt.toISOString(), ticketNumber, leadId },
+    }),
+  ]);
 
   // A committed booking is stronger evidence than anything extracted from
   // conversation: the system watched it happen. Recorded at full confidence

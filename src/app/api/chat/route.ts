@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { cookies, headers } from 'next/headers';
 import { z } from 'zod';
 import { resolveTenantByHost } from '@/server/context/tenant';
-import { ensureConversation } from '@/server/ai/extraction';
+import { openConversation } from '@/server/ai/extraction';
 import { respondToMessage } from '@/server/ai/conversation';
 import { withTenant } from '@/server/db/tenant-db';
 import { enqueue } from '@/server/jobs';
@@ -143,9 +143,18 @@ export async function POST(request: NextRequest) {
 
     // Creates the visitor if the cookie is missing, unknown, or belongs to
     // another dealership — a cookie value is never trusted as an identity.
-    const session = await ensureConversation(tenant.id, {
-      conversationId: parsed.data.conversationId,
-      visitorId: existingVisitor,
+    //
+    // Extraction and scoring run off the customer's critical path, and are
+    // queued in the same transaction: enqueued BEFORE the reply is produced so
+    // a client that disconnects mid-stream still leaves the lead to be scored,
+    // and committed together with the conversation it refers to.
+    const session = await withTenant(tenant.id, async (db) => {
+      const opened = await openConversation(db, {
+        conversationId: parsed.data.conversationId,
+        visitorId: existingVisitor,
+      });
+      await enqueue(db, 'extract_and_score', { conversationId: opened.conversationId });
+      return opened;
     });
 
     const setVisitorCookie = (response: Response) => {
@@ -160,13 +169,6 @@ export async function POST(request: NextRequest) {
       );
       return response;
     };
-
-    // Extraction and scoring run off the customer's critical path. Enqueued
-    // BEFORE the reply is produced so a client that disconnects mid-stream
-    // still leaves the lead to be scored.
-    await withTenant(tenant.id, (db) =>
-      enqueue(db, 'extract_and_score', { conversationId: session.conversationId }),
-    );
 
     if (parsed.data.stream) {
       return setVisitorCookie(

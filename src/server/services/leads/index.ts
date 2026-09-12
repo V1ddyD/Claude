@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
   customers, leads, leadSignals, leadEvents, leadScoringRules,
   type LeadPriority,
@@ -107,20 +107,24 @@ export async function upsertLead(
 
   const leadId = created[0]!.id;
 
-  await db.insert(leadEvents).values({
-    tenantId: db.tenantId,
-    leadId,
-    type: 'created',
-    actorType: 'ai',
-    summary: 'Lead created from an assistant conversation.',
-  });
-  await recordAudit(db, {
-    actor: { type: 'ai' },
-    action: 'lead.created',
-    entityType: 'lead',
-    entityId: leadId,
-    after: { customerId: params.customerId, conversationId: params.conversationId },
-  });
+  // The event and the audit row both describe the lead that now exists and
+  // neither reads the other, so they go out together.
+  await Promise.all([
+    db.insert(leadEvents).values({
+      tenantId: db.tenantId,
+      leadId,
+      type: 'created',
+      actorType: 'ai',
+      summary: 'Lead created from an assistant conversation.',
+    }),
+    recordAudit(db, {
+      actor: { type: 'ai' },
+      action: 'lead.created',
+      entityType: 'lead',
+      entityId: leadId,
+      after: { customerId: params.customerId, conversationId: params.conversationId },
+    }),
+  ]);
 
   return leadId;
 }
@@ -141,43 +145,54 @@ export async function applySignals(
   const flat = flattenSignals(signals);
   if (flat.length === 0) return;
 
-  for (const item of flat) {
-    await db
-      .update(leadSignals)
-      .set({ supersededAt: new Date() })
-      .where(
-        and(
-          eq(leadSignals.tenantId, db.tenantId),
-          eq(leadSignals.leadId, leadId),
-          eq(leadSignals.field, item.field),
-          isNull(leadSignals.supersededAt),
-        ),
-      );
+  // Every field at once, not one field at a time.
+  //
+  // This used to supersede and insert per signal, so a message that told us
+  // four things cost eight sequential statements. Superseding by `field IN
+  // (...)` and inserting the replacements as one row set is two, and the
+  // supersede-then-replace ordering that staff rely on is unchanged: the old
+  // rows are all closed before any new row exists.
+  const fields = flat.map((item) => item.field);
 
-    await db.insert(leadSignals).values({
-      tenantId: db.tenantId,
-      leadId,
-      field: item.field,
-      value: item.value as never,
-      confidence: String(item.confidence),
-      source: options.source ?? 'ai',
-      extractedFromMessageId: options.messageId ?? null,
-    });
-  }
+  await db
+    .update(leadSignals)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(leadSignals.tenantId, db.tenantId),
+        eq(leadSignals.leadId, leadId),
+        inArray(leadSignals.field, fields),
+        isNull(leadSignals.supersededAt),
+      ),
+    );
 
   // Denormalise the current best values onto the lead for querying. The signal
   // rows remain the record of how we know each one.
   const current = Object.fromEntries(flat.map((f) => [f.field, f.value]));
-  await db
-    .update(leads)
-    .set({
-      budgetCents: typeof current.budgetCents === 'number' ? current.budgetCents : undefined,
-      purchaseTimeframe: typeof current.purchaseTimeframe === 'string' ? current.purchaseTimeframe : undefined,
-      financeInterest: typeof current.financeInterest === 'boolean' ? current.financeInterest : undefined,
-      tradeInInterest: typeof current.tradeInInterest === 'boolean' ? current.tradeInInterest : undefined,
-      lastActivityAt: new Date(),
-    })
-    .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId)));
+
+  await Promise.all([
+    db.insert(leadSignals).values(
+      flat.map((item) => ({
+        tenantId: db.tenantId,
+        leadId,
+        field: item.field,
+        value: item.value as never,
+        confidence: String(item.confidence),
+        source: options.source ?? 'ai',
+        extractedFromMessageId: options.messageId ?? null,
+      })),
+    ),
+    db
+      .update(leads)
+      .set({
+        budgetCents: typeof current.budgetCents === 'number' ? current.budgetCents : undefined,
+        purchaseTimeframe: typeof current.purchaseTimeframe === 'string' ? current.purchaseTimeframe : undefined,
+        financeInterest: typeof current.financeInterest === 'boolean' ? current.financeInterest : undefined,
+        tradeInInterest: typeof current.tradeInInterest === 'boolean' ? current.tradeInInterest : undefined,
+        lastActivityAt: new Date(),
+      })
+      .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId))),
+  ]);
 }
 
 export async function recomputePriority(
@@ -185,22 +200,31 @@ export async function recomputePriority(
   leadId: string,
   bands: ScoreBands = DEFAULT_BANDS,
 ): Promise<{ priority: LeadPriority; score: number; rationale: string }> {
-  const signalRows = await db
-    .select({
-      field: leadSignals.field,
-      value: leadSignals.value,
-      confidence: leadSignals.confidence,
-    })
-    .from(leadSignals)
-    .where(
-      and(
-        eq(leadSignals.tenantId, db.tenantId),
-        eq(leadSignals.leadId, leadId),
-        isNull(leadSignals.supersededAt),
+  // The evidence, the rules to judge it by, and the priority it currently has:
+  // three reads that do not depend on each other, so one round trip.
+  const [signalRows, rules, before] = await Promise.all([
+    db
+      .select({
+        field: leadSignals.field,
+        value: leadSignals.value,
+        confidence: leadSignals.confidence,
+      })
+      .from(leadSignals)
+      .where(
+        and(
+          eq(leadSignals.tenantId, db.tenantId),
+          eq(leadSignals.leadId, leadId),
+          isNull(leadSignals.supersededAt),
+        ),
       ),
-    );
+    loadRules(db),
+    db
+      .select({ priority: leads.priority, score: leads.score })
+      .from(leads)
+      .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId)))
+      .limit(1),
+  ]);
 
-  const rules = await loadRules(db);
   const result = scoreLead(
     signalRows.map((r) => ({
       field: r.field,
@@ -211,40 +235,39 @@ export async function recomputePriority(
     bands,
   );
 
-  const before = await db
-    .select({ priority: leads.priority, score: leads.score })
-    .from(leads)
-    .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId)))
-    .limit(1);
+  const changed = before[0] && before[0].priority !== result.priority;
 
-  await db
-    .update(leads)
-    .set({
-      priority: result.priority,
-      score: result.score,
-      scoreRationale: result.rationale,
-      scoredAt: new Date(),
-    })
-    .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId)));
-
-  if (before[0] && before[0].priority !== result.priority) {
-    await db.insert(leadEvents).values({
-      tenantId: db.tenantId,
-      leadId,
-      type: 'priority_changed',
-      actorType: 'system',
-      summary: `Priority ${before[0].priority} → ${result.priority}. ${result.rationale}`,
-      payload: { firedRules: result.firedRules, score: result.score },
-    });
-    await recordAudit(db, {
-      actor: { type: 'system' },
-      action: 'lead.priority.changed',
-      entityType: 'lead',
-      entityId: leadId,
-      before: { priority: before[0].priority, score: before[0].score },
-      after: { priority: result.priority, score: result.score },
-    });
-  }
+  await Promise.all([
+    db
+      .update(leads)
+      .set({
+        priority: result.priority,
+        score: result.score,
+        scoreRationale: result.rationale,
+        scoredAt: new Date(),
+      })
+      .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId))),
+    ...(changed
+      ? [
+          db.insert(leadEvents).values({
+            tenantId: db.tenantId,
+            leadId,
+            type: 'priority_changed' as const,
+            actorType: 'system' as const,
+            summary: `Priority ${before[0]!.priority} → ${result.priority}. ${result.rationale}`,
+            payload: { firedRules: result.firedRules, score: result.score },
+          }),
+          recordAudit(db, {
+            actor: { type: 'system' },
+            action: 'lead.priority.changed',
+            entityType: 'lead',
+            entityId: leadId,
+            before: { priority: before[0]!.priority, score: before[0]!.score },
+            after: { priority: result.priority, score: result.score },
+          }),
+        ]
+      : []),
+  ]);
 
   return result;
 }
@@ -273,16 +296,18 @@ export async function recordLeadEvent(
   leadId: string,
   event: { type: string; summary: string; actorType?: 'customer' | 'staff' | 'system' | 'ai'; payload?: unknown },
 ): Promise<void> {
-  await db.insert(leadEvents).values({
-    tenantId: db.tenantId,
-    leadId,
-    type: event.type,
-    actorType: event.actorType ?? 'system',
-    summary: event.summary,
-    payload: (event.payload ?? null) as never,
-  });
-  await db
-    .update(leads)
-    .set({ lastActivityAt: sql`now()` })
-    .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId)));
+  await Promise.all([
+    db.insert(leadEvents).values({
+      tenantId: db.tenantId,
+      leadId,
+      type: event.type,
+      actorType: event.actorType ?? 'system',
+      summary: event.summary,
+      payload: (event.payload ?? null) as never,
+    }),
+    db
+      .update(leads)
+      .set({ lastActivityAt: sql`now()` })
+      .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId))),
+  ]);
 }

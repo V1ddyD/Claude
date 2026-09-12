@@ -398,24 +398,37 @@ export async function ensureConversation(
   tenantId: string,
   params: { conversationId?: string; visitorId?: string | null },
 ): Promise<{ conversationId: string; visitorId: string }> {
-  return withTenant(tenantId, async (db) => {
-    const visitorId = await ensureVisitor(db, params.visitorId);
+  return withTenant(tenantId, (db) => openConversation(db, params));
+}
 
-    if (params.conversationId) {
-      const existing = await db
-        .select({ id: conversations.id })
-        .from(conversations)
-        .where(
-          and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, params.conversationId)),
-        )
-        .limit(1);
-      if (existing[0]) return { conversationId: existing[0].id, visitorId };
-    }
+/**
+ * The same thing, inside a transaction the caller already has.
+ *
+ * The chat endpoint opens the conversation and queues the scoring job, which
+ * belong together: both are setup for the turn, and both have to be committed
+ * before a streamed reply starts. Running them as two transactions cost six
+ * round trips in BEGIN, tenant context and COMMIT alone.
+ */
+export async function openConversation(
+  db: TenantDb,
+  params: { conversationId?: string; visitorId?: string | null },
+): Promise<{ conversationId: string; visitorId: string }> {
+  const visitorId = await ensureVisitor(db, params.visitorId);
 
-    const created = await db
-      .insert(conversations)
-      .values({ tenantId: db.tenantId, visitorId })
-      .returning({ id: conversations.id });
-    return { conversationId: created[0]!.id, visitorId };
-  });
+  if (params.conversationId) {
+    const existing = await db
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(
+        and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, params.conversationId)),
+      )
+      .limit(1);
+    if (existing[0]) return { conversationId: existing[0].id, visitorId };
+  }
+
+  const created = await db
+    .insert(conversations)
+    .values({ tenantId: db.tenantId, visitorId })
+    .returning({ id: conversations.id });
+  return { conversationId: created[0]!.id, visitorId };
 }
