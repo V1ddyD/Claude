@@ -28,6 +28,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
     "@netlify/database": "^2.0.1",
+    "@netlify/functions": "^6.0.0",
+    "@netlify/plugin-nextjs": "^5.15.13",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.4",
     "drizzle-orm": "^0.44.2",
@@ -40,8 +42,6 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@netlify/functions": "^6.0.0",
-    "@netlify/plugin-nextjs": "^5.15.13",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",

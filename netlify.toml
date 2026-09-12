@@ -9,7 +9,7 @@
   # No `publish`: setting one makes Netlify serve the build as static files,
   # and for an app of entirely dynamic routes that means every page 404s.
 
-# The Next.js runtime, installed as a devDependency and declared here.
+# The Next.js runtime, a dependency and declared here.
 #
 # Netlify installs it on its own for sites built from a connected Git
 # repository. This one is deployed by API upload, where it does not — the build
@@ -17,6 +17,10 @@
 # turned the Next.js output into functions. Declaring it without installing it
 # fails the build instead, because Netlify cannot resolve it from npm; both
 # halves are needed.
+#
+# A dependency rather than a devDependency, together with @netlify/functions:
+# a build environment that omits dev dependencies would lose the plugin AND
+# fail `next build`'s type check of the scheduled function that imports them.
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
