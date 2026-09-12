@@ -55,16 +55,22 @@ async function supabaseSubject(): Promise<AuthSubject | null> {
  * portal can be built and demonstrated without provisioning a Supabase project.
  *
  * It still authorizes against the real `staff_users` table — it replaces the
- * identity provider, not the permission model. It refuses to run in production.
+ * identity provider, not the permission model. It refuses to run in production
+ * unless the deployment is an explicitly flagged, password-gated demonstration.
  */
 const DEV_COOKIE = 'sinclair_dev_staff';
 
 async function devSubject(): Promise<AuthSubject | null> {
-  if (isProduction) {
+  // Refused in production, with one exception: a deployment that has declared
+  // itself a demonstration and set a portal password. The sign-in page will
+  // not issue this cookie until that password has been supplied, so the
+  // adapter is behind a gate rather than open.
+  if (isProduction && !features.demoPortal) {
     throw new Error(
       'Supabase auth is not configured and the development auth adapter ' +
         'cannot be used in production. Set NEXT_PUBLIC_SUPABASE_URL and ' +
-        'NEXT_PUBLIC_SUPABASE_ANON_KEY.',
+        'NEXT_PUBLIC_SUPABASE_ANON_KEY, or DEMO_MODE=true with ' +
+        'DEMO_PORTAL_PASSWORD for a demonstration deployment.',
     );
   }
   const cookieStore = await cookies();
@@ -79,6 +85,9 @@ export const devAuth = {
   cookieName: DEV_COOKIE,
   encode: (authUserId: string, email: string) => `${authUserId}|${email}`,
   get enabled() {
-    return !features.supabaseAuth && !isProduction;
+    // Development, or an explicitly flagged demonstration deployment where the
+    // picker sits behind DEMO_PORTAL_PASSWORD. Never where a real identity
+    // provider is configured.
+    return !features.supabaseAuth && (!isProduction || features.demoPortal);
   },
 };

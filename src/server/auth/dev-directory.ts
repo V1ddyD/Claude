@@ -27,7 +27,10 @@ export interface DevAccount {
 }
 
 function assertDevOnly(): void {
-  if (isProduction) {
+  // A demonstration deployment is the one production-ish case allowed here,
+  // and only because the sign-in page will not call this until the demo
+  // password has been supplied.
+  if (isProduction && !features.demoPortal) {
     throw new Error('The development staff directory is not available in production.');
   }
   if (features.supabaseAuth) {

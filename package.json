@@ -18,6 +18,7 @@
     "db:migrate": "tsx src/server/db/migrate.ts",
     "db:seed": "tsx db/seeds/index.ts",
     "db:reset": "tsx db/seeds/reset.ts",
+    "domain:add": "tsx --import ./scripts/server-only-shim.mjs scripts/add-domain.ts",
     "eval": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts",
     "eval:rules": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --rules",
     "eval:live": "tsx --import ./scripts/server-only-shim.mjs scripts/eval.ts --live",
@@ -37,6 +38,7 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
+    "@netlify/functions": "^6.0.0",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",

@@ -12,3 +12,6 @@ coverage/
 .vercel
 .turbo
 .env.test.local
+
+# Netlify CLI and build output
+.netlify

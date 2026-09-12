@@ -1,0 +1,25 @@
+# Netlify configuration.
+#
+# The Next.js runtime is detected automatically; what needs declaring is the
+# scheduler. On Vercel that is `vercel.json`'s cron block, and both files are
+# kept so the same repository deploys either way.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # The migrations and the seed are run once, by hand, against the hosted
+  # database (see README). A build that migrates is a build that can take the
+  # site down; this one only compiles.
+  NODE_VERSION = "20"
+
+[functions]
+  # postgres.js and the Anthropic SDK are Node libraries, not edge ones.
+  node_bundler = "esbuild"
+
+# Drains the job queue: queued email, follow-up evaluation, hold expiry,
+# retention and rate-limit sweeping. Authenticated by CRON_SECRET, so the
+# endpoint is not a public way to run arbitrary queued work.
+[functions."worker"]
+  schedule = "*/5 * * * *"

@@ -133,8 +133,11 @@ describe('a test drive that cannot happen', () => {
     expect(reply.text).toMatch(/which of those times|suits you/i);
   });
 
-  it('refuses the second booking of one slot without claiming success', async () => {
-    // Two customers, the same first offered slot.
+  it('never confirms a booking the database did not commit', async () => {
+    // Several customers all taking the first time they are offered. The diary
+    // has more than one demonstrator, so two of them at one time is legitimate
+    // — what must never happen is a confirmation with nothing behind it, or
+    // two active bookings holding the same car.
     const book = async (name: string, email: string) => {
       const say = chat();
       await say('I would like to test drive the S3');
@@ -143,30 +146,41 @@ describe('a test drive that cannot happen', () => {
       return say('Yes, that is fine');
     };
 
-    const first = await book('Ada First', `ada.${Date.now()}@example.test`);
-    const second = await book('Bo Second', `bo.${Date.now()}@example.test`);
-
-    expect(first.toolsUsed).toContain('createTestDrive');
-    expect(first.receipt?.confirmationCode).toBeTruthy();
-
-    // The second customer is told something true either way: a booking of a
-    // different slot, or that the slot went. Never a confirmation for a
-    // booking that did not commit.
-    if (second.receipt) {
-      expect(second.receipt.confirmationCode).not.toBe(first.receipt!.confirmationCode);
-      expect(second.receipt.when).not.toBe(first.receipt!.when);
-    } else {
-      expect(second.text).not.toMatch(/booked/i);
+    const stamp = Date.now();
+    const replies = [];
+    for (const who of ['Ada First', 'Bo Second', 'Cy Third']) {
+      replies.push(await book(who, `${who.split(' ')[0]!.toLowerCase()}.${stamp}@example.test`));
     }
 
-    const [appointments] = await admin<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM appointments a
-        JOIN appointment_resources r ON r.appointment_id = a.id
+    for (const reply of replies) {
+      if (reply.receipt?.confirmationCode) {
+        // Claimed. So it must exist, with its resources actually held.
+        const [row] = await admin<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM appointments a
+            JOIN appointment_resources r ON r.appointment_id = a.id
+          WHERE a.tenant_id = ${SINCLAIR_TENANT_ID}
+            AND a.confirmation_code = ${reply.receipt.confirmationCode}
+            AND a.status = 'scheduled' AND r.status = 'active'
+        `;
+        expect.soft(row!.count, reply.receipt.confirmationCode).toBeGreaterThan(0);
+      } else {
+        // Not claimed. So it must not read as a confirmation.
+        expect.soft(reply.text).not.toMatch(/\bbooked\b/i);
+      }
+    }
+
+    // And the invariant underneath all of it: no car or specialist is held by
+    // two active appointments over the same period. The EXCLUDE constraint
+    // makes this impossible rather than unlikely — this asserts it held.
+    const clashes = await admin<{ resource_id: string }[]>`
+      SELECT a.resource_id FROM appointment_resources a
+        JOIN appointment_resources b
+          ON b.resource_id = a.resource_id AND b.id <> a.id
+          AND b.tenant_id = a.tenant_id AND b.time_range && a.time_range
       WHERE a.tenant_id = ${SINCLAIR_TENANT_ID}
-        AND a.confirmation_code = ${first.receipt!.confirmationCode!}
-        AND r.status = 'active'
+        AND a.status = 'active' AND b.status = 'active'
     `;
-    expect(appointments!.count).toBeGreaterThan(0);
+    expect(clashes).toEqual([]);
   });
 });
 

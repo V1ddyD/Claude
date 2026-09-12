@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { headers } from 'next/headers';
 import { resolveTenantByHost } from '@/server/context/tenant';
+import { features } from '@/server/config/env';
 import { Assistant } from '@/components/site/assistant';
 
 export const dynamic = 'force-dynamic';
@@ -20,6 +21,16 @@ export default async function SiteLayout({ children }: { children: React.ReactNo
 
   return (
     <div className="flex min-h-screen flex-col">
+      {features.demoPortal && (
+        // A demonstration deployment books real appointments in a demonstration
+        // database. Saying so prevents the one confusion that matters: a
+        // visitor believing they have an appointment at an actual dealership.
+        <p className="bg-ink-900 px-6 py-2 text-center text-xs text-white">
+          Demonstration site. {tenant.brandName} is a fictional dealership — anything you
+          book here is not a real appointment.
+        </p>
+      )}
+
       <header className="sticky top-0 z-20 border-b border-ink-100 bg-ink-50/90 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-6xl items-center gap-8 px-6">
           <Link

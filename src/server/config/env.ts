@@ -40,6 +40,25 @@ const schema = z.object({
   SESSION_SECRET: z.string().min(32).optional(),
   CRON_SECRET: z.string().optional(),
 
+  /**
+   * A publicly reachable demonstration deployment.
+   *
+   * This exists for one reason: showing the Dealer Portal to a prospect. The
+   * portal normally requires a real identity provider and the development
+   * staff picker refuses to load in production, which is correct and which
+   * also leaves a demo site with half a product visible.
+   *
+   * Demo mode permits the staff picker on a deployed instance, BEHIND A
+   * PASSWORD. Not decoration: a public chatbot collects whatever a visitor
+   * types, and some of them will type a real name and a real email address. A
+   * world-readable portal would publish those to anyone who found the URL.
+   *
+   * Never set this on a deployment holding a real dealership's data.
+   */
+  DEMO_MODE: z.enum(['true', 'false']).default('false'),
+  /** Required whenever DEMO_MODE is on. Handed to whoever is being shown it. */
+  DEMO_PORTAL_PASSWORD: z.string().min(8).optional(),
+
   DEFAULT_TENANT_SLUG: z.string().default('sinclair'),
 });
 
@@ -89,16 +108,32 @@ function load(): Env {
     );
   }
 
+  const demo = parsed.data.DEMO_MODE === 'true';
+
+  // A demo without a portal password would publish whatever visitors typed
+  // into the chat. Refused at boot rather than discovered later.
+  if (demo && !parsed.data.DEMO_PORTAL_PASSWORD) {
+    throw new Error(
+      'DEMO_MODE=true requires DEMO_PORTAL_PASSWORD (8+ characters). The demo portal ' +
+        'shows leads built from what visitors typed, so it is not left open.',
+    );
+  }
+
   // Production must have the real thing. Development may run without optional
   // secrets — each absence degrades one named feature rather than faking it.
   if (parsed.data.NODE_ENV === 'production') {
-    const missing = (
-      [
-        ['SESSION_SECRET', parsed.data.SESSION_SECRET],
-        ['NEXT_PUBLIC_SUPABASE_URL', parsed.data.NEXT_PUBLIC_SUPABASE_URL],
-        ['NEXT_PUBLIC_SUPABASE_ANON_KEY', parsed.data.NEXT_PUBLIC_SUPABASE_ANON_KEY],
-      ] as const
-    )
+    const required = [['SESSION_SECRET', parsed.data.SESSION_SECRET]] as const;
+
+    // A demonstration deployment has no identity provider by design; anything
+    // else in production must have one.
+    const identity = demo
+      ? []
+      : ([
+          ['NEXT_PUBLIC_SUPABASE_URL', parsed.data.NEXT_PUBLIC_SUPABASE_URL],
+          ['NEXT_PUBLIC_SUPABASE_ANON_KEY', parsed.data.NEXT_PUBLIC_SUPABASE_ANON_KEY],
+        ] as const);
+
+    const missing = [...required, ...identity]
       .filter(([, value]) => !value)
       .map(([key]) => key);
 
@@ -146,5 +181,19 @@ export const features = {
   },
   get email() {
     return Boolean(env.RESEND_API_KEY);
+  },
+  /**
+   * The password-gated staff picker is available.
+   *
+   * Requires the flag, a password, and the absence of a real identity
+   * provider — a deployment with Supabase configured uses Supabase, and this
+   * cannot override it.
+   */
+  get demoPortal() {
+    return (
+      env.DEMO_MODE === 'true' &&
+      Boolean(env.DEMO_PORTAL_PASSWORD) &&
+      !features.supabaseAuth
+    );
   },
 };

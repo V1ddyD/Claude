@@ -2,6 +2,8 @@ import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { devAuth, getAuthSubject } from '@/server/auth/session';
 import { listDevAccounts, findDevAccount } from '@/server/auth/dev-directory';
+import { verifyDemoPassword } from '@/server/auth/demo-portal';
+import { features } from '@/server/config/env';
 
 /**
  * Never prerendered. The portal is per-request by nature: it reads a session
@@ -46,6 +48,13 @@ export default async function SignInPage() {
     'use server';
     const id = String(formData.get('id') ?? '');
 
+    // On a demonstration deployment the picker is public but the sign-in is
+    // not. Checked server-side, in constant time, on every submission — the
+    // form being rendered proves nothing about who is submitting it.
+    if (features.demoPortal && !verifyDemoPassword(String(formData.get('password') ?? ''))) {
+      redirect('/portal/sign-in?error=wrong-password');
+    }
+
     // Re-read the account server-side. The form is untrusted input: a posted id
     // for a suspended or non-existent account must not produce a session.
     const account = await findDevAccount(id);
@@ -65,15 +74,36 @@ export default async function SignInPage() {
   return (
     <Frame>
       <p className="text-sm text-ink-500">
-        Development sign-in. No identity provider is configured, so the portal
-        authenticates against seeded staff accounts. Authorization is unchanged — each
-        account carries its real role and permissions.
+        {features.demoPortal
+          ? 'Demonstration sign-in. Choose a member of staff to see the portal as they ' +
+            'would. Authorization is unchanged — each account carries its real role and ' +
+            'permissions.'
+          : 'Development sign-in. No identity provider is configured, so the portal ' +
+            'authenticates against seeded staff accounts. Authorization is unchanged — ' +
+            'each account carries its real role and permissions.'}
       </p>
+
+      {features.demoPortal && (
+        <p className="mt-4 text-sm text-ink-500">
+          The portal shows enquiries left by visitors, so it is password protected.
+        </p>
+      )}
+
       <ul className="mt-6 divide-y divide-ink-100 border-y border-ink-100">
         {accounts.map((account) => (
           <li key={account.id}>
             <form action={signInAs}>
               <input type="hidden" name="id" value={account.id} />
+              {features.demoPortal && (
+                <input
+                  type="password"
+                  name="password"
+                  required
+                  placeholder="Demonstration password"
+                  aria-label={`Demonstration password to sign in as ${account.fullName}`}
+                  className="mt-3 w-full border border-ink-100 px-3 py-2 text-sm"
+                />
+              )}
               <button
                 type="submit"
                 className="flex w-full items-center justify-between py-3 text-left hover:bg-ink-50"
@@ -91,6 +121,12 @@ export default async function SignInPage() {
           </li>
         ))}
       </ul>
+      {features.demoPortal && (
+        <p className="mt-4 text-xs text-ink-500">
+          Everything here is fictional seed data for one demonstration dealership.
+        </p>
+      )}
+
       {accounts.length === 0 && (
         <p className="mt-6 text-sm text-accent-600">
           No active staff accounts. Run <code>npm run db:seed</code>.
@@ -109,3 +145,4 @@ function Frame({ children }: { children: React.ReactNode }) {
     </main>
   );
 }
+
