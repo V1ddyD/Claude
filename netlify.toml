@@ -28,16 +28,12 @@
   # The migrations and the seed are run once, by hand, against the hosted
   # database (see README). A build that migrates is a build that can take the
   # site down; this one only compiles.
-  NODE_VERSION = "20"
+  NODE_VERSION = "22"
 
 # `@netlify/database` is a dependency for one reason: its presence is what makes
 # Netlify provision a Postgres for this site. The application does not import
 # it — it talks to the database through postgres.js and DATABASE_URL, so the
 # same code runs on any Postgres anywhere.
-
-[functions]
-  # postgres.js and the Anthropic SDK are Node libraries, not edge ones.
-  node_bundler = "esbuild"
 
 # Drains the job queue: queued email, follow-up evaluation, hold expiry,
 # retention and rate-limit sweeping. Authenticated by CRON_SECRET, so the
