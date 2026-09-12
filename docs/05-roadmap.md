@@ -104,6 +104,15 @@ code change. That is the real test of whether the multi-tenant claim is true.
 
 ---
 
+## M7 — The assistant without a model ✅
+
+The chatbot is the product; it now runs without a credential. A second `ModelClient`
+implementation classifies, extracts and composes deterministically over the same
+twenty-two-tool registry, so booking, consent, ticketing, scoring and the portal can all
+be demonstrated today. Swapping in Claude changes one function.
+
+---
+
 ## Sequencing principles
 
 1. **Nothing fake.** If a surface isn't wired to the backend, it doesn't ship — §60.

@@ -80,6 +80,7 @@ function streamReply(params: {
         send('done', {
           conversationId: reply.conversationId,
           degraded: reply.degraded,
+          mode: reply.mode,
         });
       } catch (error) {
         if (!isAppError(error)) {
@@ -192,6 +193,7 @@ export async function POST(request: NextRequest) {
         message: reply.text,
         conversationId: session.conversationId,
         degraded: reply.degraded,
+        mode: reply.mode,
         ...(reply.receipt ? { receipt: reply.receipt } : {}),
       }),
     );

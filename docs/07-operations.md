@@ -42,7 +42,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 The operator's key, set once, server-side. Customers never supply, see, or are asked for
 one — enforced by a lint rule, a test, and a CI grep of the built client bundle.
 
-Absent, the assistant degrades to a contact form and says so honestly. The site stays up.
+Absent, the rule-based assistant answers instead: the same tools and the same live data,
+a fixed set of instructions rather than a model. The site is fully usable — customers can
+price a build, check stock, book a test drive and reach the team — it is simply plainer,
+and it says "I do not have that confirmed" where the model would reason.
+
+Which one answered is on every reply: `mode` is `model`, `scripted`, or `offline` (no
+assistant at all — only when a caller passes one explicitly). It is on the JSON response
+and on the SSE `done` event. It is deliberately NOT shown to the customer; the assistant
+never advertises what is behind it (spec §35).
 
 ### 3. The scheduler
 
@@ -100,9 +108,17 @@ In order:
 
 ### "The assistant is refusing to answer"
 
-Check, in order: is a key configured (`features.ai`), and is the tenant within its
-monthly token budget? Both degrade to the contact form deliberately — the customer sees
-a service problem rather than a billing one.
+Check `mode` on the reply first.
+
+- `scripted` — no key is configured, or the tenant has spent its monthly token budget.
+  The assistant still works; it is answering from rules. Costs nothing, so there is no
+  hurry, but the customer is getting the plainer experience.
+- `offline` — no assistant at all. Only reachable when a caller passes `client: null`.
+- `model` — the model answered, so a refusal to answer is a grounding decision, not a
+  configuration one: no tool returned the fact. That is correct behaviour.
+
+A budget that is spent falls back to the scripted assistant rather than to a dead end.
+The customer sees a plainer assistant, never a billing problem.
 
 ### "A customer says they were double-booked"
 
@@ -133,6 +149,7 @@ is the failure — not the application code.
 | Who changed this? | `audit_logs`, append-only; the app role has no UPDATE or DELETE |
 | Did this booking commit? | `appointments` + `appointment_resources` — a ticket without an appointment cannot exist |
 | What is the queue doing? | `job_queue` — `dead` rows are jobs that exhausted their retries |
+| Which assistant answered? | `mode` on the reply: `model`, `scripted` or `offline` |
 
 ---
 
@@ -140,7 +157,7 @@ is the failure — not the application code.
 
 ```bash
 npm run db:reset && npm run db:seed    # Sinclair, 10 models, 86 units
-npm test                               # 247 assertions
+npm test                               # 293 assertions
 npm run eval                           # the scripted assistant corpus
 npm run eval:live                      # needs a key; measures the model itself
 ```
@@ -155,7 +172,12 @@ prefix, which is most of the difference.
 
 - **The assistant has never spoken to Claude.** No credential has existed in any
   environment it has been built in. Everything around the model is tested; the model's
-  own judgement is not.
+  own judgement is not. Until a key exists the rule-based assistant answers — the same
+  tools and the same data, pattern matching instead of reasoning. It is a demonstrable
+  product, not a substitute for measuring the model.
+- **The rule-based assistant does not extract.** With no model there is no Pass B, so
+  leads carry what the write tools observed (name, email, chosen model, intent) and not
+  what a customer implied about budget or timeframe. Priorities are real but thinner.
 - **Rate limiting is a fixed window**, not a sliding one. A caller can send two bursts
   across a window boundary. Adequate for abuse, not for precise quota.
 - **No MFA.** Recommended for MANAGER and ADMIN before a second dealership goes live.

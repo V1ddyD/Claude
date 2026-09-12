@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import type { Sql } from 'postgres';
 import { prepareDatabase, adminConnection } from '../helpers/db';
 import { SINCLAIR_TENANT_ID, SINCLAIR_STAFF } from '../../db/seeds/sinclair';
@@ -198,6 +198,26 @@ describe('staff notes', () => {
 });
 
 describe('follow-ups', () => {
+  /**
+   * Follow-ups are evaluated over every lead a dealership has, and leads
+   * accumulate across runs. Each test below asserts about the lead IT created,
+   * so everything already in the database is put beyond the rules' reach first
+   * — otherwise the suite passes only until the hundredth stale lead, which is
+   * a worse way to find out.
+   */
+  beforeEach(async () => {
+    await admin`
+      UPDATE leads SET status = 'lost', last_activity_at = now()
+      WHERE tenant_id = ${SINCLAIR_TENANT_ID}
+    `;
+    await admin`DELETE FROM follow_up_tasks WHERE tenant_id = ${SINCLAIR_TENANT_ID}`;
+    await admin`UPDATE tickets SET status = 'closed' WHERE tenant_id = ${SINCLAIR_TENANT_ID}`;
+    await admin`
+      UPDATE appointments SET status = 'completed'
+      WHERE tenant_id = ${SINCLAIR_TENANT_ID} AND starts_at < now()
+    `;
+  });
+
   it('raises a task for a high-priority lead nobody has touched', async () => {
     const leadId = await newLead();
     await admin`

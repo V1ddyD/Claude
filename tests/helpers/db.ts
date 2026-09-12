@@ -69,6 +69,14 @@ export async function prepareDatabase(): Promise<void> {
         cancelled_reason = 'released by the test harness'
       WHERE status IN ('scheduled', 'confirmed')
     `;
+
+    // Empty the job queue for the same reason.
+    //
+    // The worker claims a batch of whatever is pending, and one suite
+    // deliberately enqueues a job with no handler. Left behind, those
+    // accumulate until a later run's batch is nothing but other runs' rubbish
+    // and the worker legitimately reports that it completed none of it.
+    await sql`DELETE FROM job_queue`;
   } finally {
     await sql.end({ timeout: 5 });
   }

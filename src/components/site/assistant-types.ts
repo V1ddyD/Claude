@@ -18,9 +18,19 @@ export interface ChatMessage {
   streaming?: boolean;
 }
 
+/**
+ * Which assistant answered.
+ *
+ * 'scripted' is the rule-based assistant — real tools and real data, a fixed
+ * set of instructions. 'offline' means none answered and the enquiry goes to
+ * the team.
+ */
+export type AssistantMode = 'model' | 'scripted' | 'offline';
+
 export interface ChatResponse {
   message: string;
   conversationId: string;
   degraded: boolean;
+  mode?: AssistantMode;
   receipt?: Receipt;
 }

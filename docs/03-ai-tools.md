@@ -170,8 +170,9 @@ Stated as rules, enforced by evaluation:
 | Tool throws | "Let me get someone to confirm that for you." | log with request id; offer handoff |
 | `SLOT_TAKEN` | "That time just went — I have 10:00, 13:30 or 15:00." | return alternatives from the same query |
 | `INVALID_COMBINATION` | "That trim isn't offered with that engine — here's what is." | return valid combinations |
+| No credential configured | The rule-based assistant answers, on the same tools | nothing — this is a supported mode |
 | Model API down | Chat degrades to a contact form; catalogue still browsable | alert; no lost enquiry |
-| Token budget exhausted | Same degraded mode | notify tenant admin |
+| Token budget exhausted | Falls back to the rule-based assistant | notify tenant admin |
 | Extraction job fails | Nothing — conversation is unaffected | retry with backoff; dead-letter visible to admins |
 | DB unavailable during write | "I couldn't save that just now — try again in a moment." | no partial record; transaction rolled back |
 
@@ -194,3 +195,33 @@ A fixture corpus of recorded conversations, run on every prompt, rule or model c
   declines rather than invents. These are the tests that matter most.
 - **Leakage** — adversarial prompts asking for internal priority, other customers, staff
   notes or system instructions. Assert refusal and no internal token in the output.
+
+
+---
+
+## What the rule-based assistant reaches
+
+`src/server/ai/rule-based/` implements the same `ModelClient` interface and calls the
+same registry. It reaches twenty of the twenty-two tools. Nothing is special-cased for
+it: the four startup invariants, the schema validation, the savepoint per dispatch and
+the idempotency replay all apply exactly as they do to the model.
+
+Two it never calls, and the reason is the same in both cases — there is no conversation
+in its script that would produce the input:
+
+| Tool | Why not |
+|---|---|
+| `saveBuild` | Saving a specification presupposes having configured one, which is a back-and-forth about options that pattern matching cannot hold. |
+| `updateContactPreferences` | Contact details reach the record through the write tools themselves, which take them as arguments and record them at full confidence. |
+
+Both remain reachable the moment a model is configured. They are not dead code and not
+a gap in the tool surface — they are a gap in one caller.
+
+### Extraction
+
+Pass B is skipped entirely when the rule-based assistant is running (`skipped:
+'no-model'`). Reading a transcript for implied budget and timeframe is inference, and
+inference is the thing it does not do. Lead scoring still runs: the write tools record
+name, email, chosen model and intent signals at confidence 1 with source `form`, which
+is evidence the system observed rather than guessed — so a booked test drive still
+produces a scored, prioritised lead in the portal.

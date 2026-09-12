@@ -5,6 +5,7 @@ import { and, eq, asc } from 'drizzle-orm';
 import { messages as messagesTable, conversations, leads } from '@/server/db/schema';
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 import { modelClient, EXTRACTION_MODEL, type ModelClient } from '@/server/ai/client';
+import { RuleBasedModel } from '@/server/ai/rule-based';
 import { EXTRACTION_SYSTEM_PROMPT } from '@/server/ai/prompts/system';
 import { leadSignalsSchema, type LeadSignals } from '@/server/services/scoring/signals';
 import { applySignals, recomputePriority, findLeadForConversation } from '@/server/services/leads';
@@ -30,7 +31,7 @@ export interface ExtractionResult {
   priority?: 'low' | 'medium' | 'high';
   score?: number;
   rationale?: string;
-  skipped?: 'no-lead' | 'no-client' | 'no-signals' | 'invalid-output';
+  skipped?: 'no-lead' | 'no-client' | 'no-model' | 'no-signals' | 'invalid-output';
 }
 
 export async function extractAndScore(params: {
@@ -48,6 +49,14 @@ export async function extractAndScore(params: {
     // fill the portal with records staff cannot act on.
     if (!lead) return { leadId: null, signals: {}, skipped: 'no-lead' };
     if (!client) return { leadId: lead.id, signals: {}, skipped: 'no-client' };
+
+    // Pass B is inference, and the rule-based assistant does not infer. Asking
+    // it to read a transcript would be a pointless round trip that could only
+    // return nothing. Scoring still happens: the write tools record name,
+    // email and model at full confidence, which is most of what moves a lead.
+    if (client instanceof RuleBasedModel) {
+      return { leadId: lead.id, signals: {}, skipped: 'no-model' };
+    }
 
     const transcript = await loadTranscript(db, params.conversationId);
     if (transcript.length === 0) return { leadId: lead.id, signals: {}, skipped: 'no-signals' };

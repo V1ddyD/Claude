@@ -7,6 +7,7 @@ import { getTenantById } from '@/server/context/tenant';
 import { toolRegistry } from '@/server/ai/tools';
 import type { ToolContext } from '@/server/ai/tools/define';
 import { modelClient, type ModelClient } from '@/server/ai/client';
+import { RuleBasedModel, ruleBasedClient } from '@/server/ai/rule-based';
 import { buildSystemPrompt } from '@/server/ai/prompts/system';
 import { buildPinnedFacts } from '@/server/ai/context';
 import { formatMoney } from '@/server/services/pricing';
@@ -87,6 +88,14 @@ export interface ConversationReply {
   conversationId: string;
   toolsUsed: string[];
   degraded: boolean;
+  /**
+   * Which assistant answered.
+   *
+   * 'scripted' is the rule-based assistant: real tools and real data, a fixed
+   * set of instructions. 'offline' is the contact-form path, where no
+   * assistant answered at all.
+   */
+  mode: 'model' | 'scripted' | 'offline';
   receipt?: Receipt;
 }
 
@@ -104,11 +113,16 @@ export async function respondToMessage(params: {
   let client = params.client !== undefined ? params.client : modelClient();
   const now = params.now ?? new Date();
 
-  // A dealership that has spent its monthly budget degrades to the contact
-  // form. The customer sees a service problem, never a billing one, and the
-  // enquiry still reaches the dealership.
-  if (client && params.client === undefined && !(await hasAiBudget(params.tenantId))) {
-    client = null;
+  // A dealership that has spent its monthly budget falls back to the scripted
+  // assistant rather than to a dead end. It costs nothing to run and still
+  // books a test drive; the customer sees a plainer assistant, never a bill.
+  if (
+    client &&
+    params.client === undefined &&
+    !(client instanceof RuleBasedModel) &&
+    !(await hasAiBudget(params.tenantId))
+  ) {
+    client = ruleBasedClient();
   }
 
   if (!client) {
@@ -126,6 +140,7 @@ export async function respondToMessage(params: {
       conversationId: params.conversationId,
       toolsUsed: [],
       degraded: true,
+      mode: 'offline',
     };
   }
 
@@ -265,6 +280,7 @@ export async function respondToMessage(params: {
       conversationId: params.conversationId,
       toolsUsed,
       degraded: false,
+      mode: client instanceof RuleBasedModel ? 'scripted' : 'model',
       ...(receipt ? { receipt } : {}),
     };
   });

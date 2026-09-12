@@ -1,6 +1,7 @@
 import 'server-only';
 import Anthropic from '@anthropic-ai/sdk';
 import { env, features } from '@/server/config/env';
+import { ruleBasedClient } from '@/server/ai/rule-based';
 import { AppError } from '@/server/errors';
 
 /**
@@ -132,13 +133,23 @@ class AnthropicModelClient implements ModelClient {
 let cached: ModelClient | undefined;
 
 /**
- * Returns null when no credential is available. Callers degrade rather than
- * throw: the catalogue stays browsable and enquiries still reach the
- * dealership through a form (spec §33 — every external dependency can fail).
+ * The assistant a conversation should use.
+ *
+ * With a credential, the model. Without one, the rule-based assistant: it
+ * drives the same tools against the same live data, so the site works out of
+ * the box and the whole workflow — booking, ticketing, scoring, email — can be
+ * exercised before a key exists. It is plainer, never wrong, and it says so
+ * when it does not know something.
+ *
+ * Callers can still pass an explicit null to force the contact-form path
+ * (spec §33 — every external dependency can fail).
  */
-export function modelClient(): ModelClient | null {
-  if (!features.ai) return null;
-  cached ??= new AnthropicModelClient(env.ANTHROPIC_API_KEY);
+export function modelClient(): ModelClient {
+  // The test seam wins, so a scripted client injected in development or in a
+  // test is still used when no credential happens to be configured.
+  if (cached) return cached;
+  if (!features.ai) return ruleBasedClient();
+  cached = new AnthropicModelClient(env.ANTHROPIC_API_KEY);
   return cached;
 }
 

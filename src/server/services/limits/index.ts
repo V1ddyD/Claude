@@ -35,10 +35,14 @@ export async function checkRateLimit(limit: RateLimit): Promise<RateLimitResult>
 
   // One statement: insert the window or increment it, returning the new count.
   // Two concurrent requests cannot both read "0" and both write "1".
+  //
+  // The timestamp goes in as an ISO string with an explicit cast. A raw Date in
+  // a template parameter reaches the driver with no type attached, which it
+  // refuses — and every request to the chat endpoint went through this line.
   const rows = (await withoutTenantScope('worker', (db) =>
     db.execute(sql`
       INSERT INTO rate_limit_counters (bucket, subject, window_start, count)
-      VALUES (${limit.bucket}, ${limit.subject}, ${windowStart}, 1)
+      VALUES (${limit.bucket}, ${limit.subject}, ${windowStart.toISOString()}::timestamptz, 1)
       ON CONFLICT (bucket, subject, window_start)
         DO UPDATE SET count = rate_limit_counters.count + 1
       RETURNING count

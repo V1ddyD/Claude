@@ -580,13 +580,108 @@ provisioned.
 
 ---
 
+## M7 — The assistant without a model ✅
+
+The chatbot is the product, and until now the product did not run: without a key the
+site answered "I can't reach our assistant service just now" and offered a contact form.
+This milestone makes the assistant work out of the box, and makes the workflow
+demonstrable end to end — deterministically, which is something a model cannot be asked
+to be.
+
+### Built
+
+`src/server/ai/rule-based/` — a second implementation of `ModelClient`, four modules:
+
+- `understand.ts` — classifies a message into one of twenty intents and extracts models,
+  trims, colours, powertrains, budget, body style, contact details, dates, loan terms,
+  trade-in vehicles, confirmation codes and a place in a list.
+- `state.ts` — reads the conversation back out of the message list. It keeps no state of
+  its own; everything it knows it re-derives, so a restart or a retry cannot disagree
+  with it about where a booking had got to.
+- `script.ts` — decides. Each branch names the tools it calls and the facts it will not
+  call a write tool without.
+- `compose.ts` — turns tool results into prose. Every figure in a reply came out of a
+  tool; nothing is padded, rounded or inferred.
+
+It drives twenty of the twenty-two tools through the same registry, the same savepoints,
+the same idempotency and the same projections (docs/03-ai-tools.md). Swapping it for
+Claude changes which client `modelClient()` returns and nothing else.
+
+Two behaviours changed around it:
+
+- A tenant that has spent its monthly token budget now falls back to the scripted
+  assistant rather than to a contact form. It costs nothing to run and still books a test
+  drive.
+- Pass B is skipped when the scripted assistant is running. Inference is the thing it
+  does not do; scoring still works, because the write tools record identity and intent at
+  confidence 1.
+
+Every reply now carries `mode` — `model`, `scripted` or `offline` — on the JSON response
+and the SSE `done` event. It is deliberately not shown to the customer: the assistant
+does not advertise what is behind it (spec §35).
+
+### Verified
+
+Nine integration cases drive real conversations through the real tools against the real
+database: catalogue questions, an unbuildable question, the booking flow gate by gate,
+cancellation with the code it issued, a trade-in, a callback, a handoff, a finance
+estimate, and an unanswerable question becoming a ticket. Thirty-four unit cases pin the
+classifier and the slot matching.
+
+Then the whole thing over HTTP, against a running dev server: a greeting, a search, a
+powertrain question, a priced build, five offered times, a chosen time, contact details,
+a consent question, and a booking with a confirmation code — plus the SSE path streaming
+word by word.
+
+### Seven bugs, five of them older than this milestone
+
+1. **Every request to `/api/chat` returned 500.** The rate limiter passed a `Date`
+   straight into a raw SQL parameter and the driver refused it. Invisible because every
+   test called `respondToMessage` directly and nothing exercised the route. Fixed with an
+   explicit `::timestamptz` cast, and `tests/integration/rate-limit.test.ts` now covers
+   the endpoint's front door.
+2. **The classifier was blind to plurals.** `\b` after "engine" does not match
+   "engines" — nor colours, trims, options or payments. Roughly half of what a dealership
+   is actually asked was falling through to the wrong branch.
+3. **`findName` never matched an introduction.** The patterns were case-sensitive, so
+   "I'm Alex Mercer" did not match `i'?m`. The one pattern that did carry `/i` applied it
+   to the capture group too, where capitalisation is the only thing separating a name
+   from an ordinary word.
+4. **A phone number read as a budget.** "416 555 0134" became a $416,555 budget. Contact
+   details are now removed from the text before any figure is read as a price, and
+   mileage with it.
+5. **Follow-up rules took an arbitrary hundred leads.** The batch cap had no ordering, so
+   a dealership with a backlog over a hundred could have its longest-waiting leads never
+   surface at all. Now oldest first, so a backlog drains in order across runs.
+6. **The test job queue poisoned itself.** One suite deliberately enqueues a job with no
+   handler; left behind, those accumulated until a later run's batch was nothing but
+   other runs' rubbish and the worker correctly reported that it had completed none of
+   it. The harness now starts each run with an empty queue.
+7. **Paint and upholstery in one list.** A customer asking about colours was shown nine,
+   three of which were leather.
+
+Four of those seven only appeared because the suite was run repeatedly against an
+accumulating database rather than once against a clean one.
+
+### Deliberately not built
+
+No `saveBuild` and no `updateContactPreferences` dialogue — both need a back-and-forth
+about options that pattern matching cannot hold, and both stay reachable the moment a
+model is configured. No attempt at fuzzy matching or synonym expansion: a question it
+does not recognise gets an honest "I do not have that confirmed" and an offer to pass it
+to the team, which is the same failure the model is instructed to make and a better one
+than a confident guess.
+
+---
+
 ## What remains
 
 **One thing needs you, and one thing needs a decision.**
 
 1. **A credential.** The assistant has still never spoken to Claude. `npm run eval:live`
    is built, metered and capped at $2.00; a full run costs about $0.34. This is the only
-   part of the product whose behaviour is unmeasured.
+   part of the product whose behaviour is unmeasured. The site no longer waits on it: the
+   rule-based assistant answers until a key exists, on the same tools and the same data.
 2. **A deployment.** Nothing has been deployed. The runbook covers it, but the accounts
    are yours.
 

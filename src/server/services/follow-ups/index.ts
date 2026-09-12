@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, or, isNull, lt, gte, lte, inArray } from 'drizzle-orm';
+import { and, asc, eq, or, isNull, lt, gte, lte, inArray } from 'drizzle-orm';
 import {
   leads, leadEvents, followUpTasks, followUpRules, appointments, tickets, notifications,
 } from '@/server/db/schema';
@@ -13,6 +13,15 @@ import { DEFAULT_FOLLOW_UP_RULES, type FollowUpRule } from './rules';
  * (tenant, lead, rule, due_at), so re-running produces no duplicates. A worker
  * that ran twice must not nag a salesperson twice.
  */
+
+/**
+ * How many leads one rule may raise tasks for in a single pass.
+ *
+ * A bound on the work, not on who is eligible: each query takes the oldest
+ * first, so a backlog drains in order across runs rather than leaving the same
+ * arbitrary hundred to be picked every time.
+ */
+const BATCH = 100;
 
 export interface FollowUpReport {
   created: number;
@@ -74,7 +83,10 @@ export async function evaluateFollowUps(tenantId: string, now = new Date()): Pro
                 lt(leads.createdAt, cutoff),
               ),
             )
-            .limit(100);
+            // Oldest first. The cap is a batch size, not a filter: whoever has
+            // waited longest must not be the one it silently drops.
+            .orderBy(asc(leads.createdAt))
+            .limit(BATCH);
 
           await record(
             rule,
@@ -103,7 +115,8 @@ export async function evaluateFollowUps(tenantId: string, now = new Date()): Pro
                 lt(tickets.createdAt, cutoff),
               ),
             )
-            .limit(100);
+            .orderBy(asc(tickets.createdAt))
+            .limit(BATCH);
 
           await record(
             rule,
@@ -138,7 +151,8 @@ export async function evaluateFollowUps(tenantId: string, now = new Date()): Pro
                 lte(appointments.startsAt, to),
               ),
             )
-            .limit(100);
+            .orderBy(asc(appointments.startsAt))
+            .limit(BATCH);
 
           await record(
             rule,
@@ -165,7 +179,8 @@ export async function evaluateFollowUps(tenantId: string, now = new Date()): Pro
                 lt(leads.lastActivityAt, cutoff),
               ),
             )
-            .limit(100);
+            .orderBy(asc(leads.lastActivityAt))
+            .limit(BATCH);
 
           await record(
             rule,

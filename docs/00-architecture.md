@@ -215,6 +215,32 @@ POST /api/chat  (Node runtime, streaming)
   └─ enqueue job: extract_and_score(conversation_id)   ← asynchronous, off the hot path
 ```
 
+### Two assistants behind one interface
+
+`ModelClient` has two implementations, and nothing downstream of `modelClient()` knows
+which one it has:
+
+| | `AnthropicModelClient` | `RuleBasedModel` |
+|---|---|---|
+| Decides what to say | Claude Opus 5 | `src/server/ai/rule-based/` |
+| Tools it can call | the registry | the registry |
+| Services, scoring, tickets, email | identical | identical |
+| Cost per turn | metered | none |
+| Selected when | a credential is configured | no credential, or the tenant's budget is spent |
+
+The rule-based assistant classifies the message, extracts what it can, calls the same
+tools, and composes its reply out of what they returned. It never states a figure a tool
+did not return, and when it does not recognise a question it says so and offers the
+team — the same three states the prompt asks the model to keep distinct.
+
+It exists for two reasons. The site works out of the box, with no key and no contact
+form; and the whole workflow — booking, consent, ticketing, lead scoring, the portal —
+can be exercised end to end deterministically, which a model cannot be asked to do.
+
+What it is not: an understanding of language. It matches patterns. A question phrased
+unusually falls through to the honest "I do not have that confirmed" and a ticket, which
+is the right failure but a visibly plainer experience than the model gives.
+
 ### Two passes, deliberately separate
 
 **Pass A — the conversational agent.** Answers the customer, calls tools. Its context
