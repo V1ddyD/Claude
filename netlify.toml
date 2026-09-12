@@ -6,11 +6,19 @@
 
 [build]
   command = "npm run build"
-  # Neither `publish` nor a plugin declaration. Netlify detects Next.js and
-  # applies its runtime itself; setting a publish directory makes it serve the
-  # build as static files instead, which for an app of entirely dynamic routes
-  # means every page 404s, and declaring the runtime as a plugin fails the
-  # build because it is not resolvable from npm.
+  # No `publish`: setting one makes Netlify serve the build as static files,
+  # and for an app of entirely dynamic routes that means every page 404s.
+
+# The Next.js runtime, installed as a devDependency and declared here.
+#
+# Netlify installs it on its own for sites built from a connected Git
+# repository. This one is deployed by API upload, where it does not — the build
+# succeeds, `plugin_state` reads "none", and every route 404s because nothing
+# turned the Next.js output into functions. Declaring it without installing it
+# fails the build instead, because Netlify cannot resolve it from npm; both
+# halves are needed.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
 
 [build.environment]
   # The migrations and the seed are run once, by hand, against the hosted
