@@ -18,19 +18,16 @@ export async function ensureVisitor(
   visitorId?: string | null,
 ): Promise<string> {
   if (visitorId) {
-    const existing = await db
-      .select({ id: visitors.id })
-      .from(visitors)
+    // One statement, not a read and then a write: touching the row IS the
+    // existence check, and `returning` says whether there was a row to touch.
+    // Two statements cost two network round trips to learn one thing.
+    const seen = await db
+      .update(visitors)
+      .set({ lastSeenAt: sql`now()` })
       .where(and(eq(visitors.tenantId, db.tenantId), eq(visitors.id, visitorId)))
-      .limit(1);
+      .returning({ id: visitors.id });
 
-    if (existing[0]) {
-      await db
-        .update(visitors)
-        .set({ lastSeenAt: sql`now()` })
-        .where(and(eq(visitors.tenantId, db.tenantId), eq(visitors.id, visitorId)));
-      return existing[0].id;
-    }
+    if (seen[0]) return seen[0].id;
     // A cookie naming a visitor this tenant has never seen — cleared data, a
     // different dealership, a forged value. Mint a fresh one rather than trust it.
   }

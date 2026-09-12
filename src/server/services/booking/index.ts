@@ -244,20 +244,30 @@ export async function createTestDrive(
   });
 
   const confirmationCode = generateConfirmationCode();
-  const created = await db
-    .insert(appointments)
-    .values({
-      tenantId: db.tenantId,
-      type: 'test_drive',
-      customerId: request.customerId,
-      leadId,
-      startsAt: request.startsAt,
-      endsAt,
-      confirmationCode,
-      customerNotes: request.customerNotes ?? null,
-      createdByType: 'ai',
-    })
-    .returning({ id: appointments.id });
+
+  // Neither the vehicle's name nor the next ticket number depends on the
+  // appointment, so they are asked for while it is being created rather than
+  // after it exists.
+  const [[vehicleLabel, ticketNumber], created] = await Promise.all([
+    Promise.all([
+      describeVehicle(db, freeVehicle),
+      allocateTicketNumber(db, { prefix: tenant.ticketPrefix }),
+    ]),
+    db
+      .insert(appointments)
+      .values({
+        tenantId: db.tenantId,
+        type: 'test_drive',
+        customerId: request.customerId,
+        leadId,
+        startsAt: request.startsAt,
+        endsAt,
+        confirmationCode,
+        customerNotes: request.customerNotes ?? null,
+        createdByType: 'ai',
+      })
+      .returning({ id: appointments.id }),
+  ]);
 
   const appointmentId = created[0]!.id;
 
@@ -295,11 +305,6 @@ export async function createTestDrive(
     }
     throw err;
   }
-
-  const [vehicleLabel, ticketNumber] = await Promise.all([
-    describeVehicle(db, freeVehicle),
-    allocateTicketNumber(db, { prefix: tenant.ticketPrefix }),
-  ]);
 
   const formattedWhen = formatSlot({ startsAt: request.startsAt, endsAt }, tenant.timezone, tenant.locale);
   const emailQueued = Boolean(customer[0].email && customer[0].consent);
