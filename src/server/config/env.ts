@@ -62,7 +62,18 @@ let cached: Env | undefined;
 function load(): Env {
   if (cached) return cached;
 
-  const parsed = schema.safeParse(process.env);
+  // An empty variable is not a configured value.
+  //
+  // `.env.example` ships keys with nothing after the `=`, which is how an
+  // operator is shown what exists without being given a fake value. Passed
+  // through as empty strings those fail `min(32)` and enum checks, so copying
+  // the example file would stop the application booting — which is precisely
+  // the moment somebody is trying it for the first time.
+  const configured = Object.fromEntries(
+    Object.entries(process.env).filter(([, value]) => value !== undefined && value !== ''),
+  );
+
+  const parsed = schema.safeParse(configured);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`);
     throw new Error(`Invalid server environment:\n${issues.join('\n')}`);

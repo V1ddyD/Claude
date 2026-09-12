@@ -1,0 +1,30 @@
+# A local PostgreSQL for running Sinclair on your own machine.
+#
+#   docker compose up -d
+#   npm run db:migrate && npm run db:seed
+#   npm run dev
+#
+# Trust authentication, so the connection strings in .env.example work as
+# written and the unprivileged `app_user` role the migrations create can log in
+# without a password. That is fine for a database on your laptop and wrong for
+# anything reachable from elsewhere — this file binds to 127.0.0.1 only, and a
+# deployment uses a managed database with real credentials.
+services:
+  postgres:
+    image: postgres:16
+    container_name: sinclair-db
+    environment:
+      POSTGRES_DB: sinclair
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - sinclair-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d sinclair']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  sinclair-db:

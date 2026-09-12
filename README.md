@@ -23,7 +23,7 @@ Business logic lives **only** in the backend. The two front-ends are views over 
 
 ## Status
 
-**M6 — Production readiness, complete.** Built and verified so far:
+**M8 — The scripted AI layer, complete.** Built and verified so far:
 
 - Schema applied and migrated (47 tables, 44 tenant-scoped)
 - Tenant isolation enforced by Postgres RLS, proven by a non-skippable suite
@@ -64,27 +64,80 @@ Business logic lives **only** in the backend. The two front-ends are views over 
   its own hostname, timezone, currency and ticket series, proven by a test that stands up
   a third dealership from a config object alone
 
-247 tests pass against a real PostgreSQL 16, stable across repeated runs, including
+- **A scripted AI implementation** selected by `AI_PROVIDER`, so the product runs with no
+  credential at all. It holds no dealership's catalogue: models come from the tenant's own
+  range and trims, colours and engines are resolved against what the tools return. It
+  extracts lead evidence deterministically into the same rule engine
+- Proven across **every model in the catalogue** and against a second dealership with an
+  entirely different range, whose assistant does not recognise the first one's model names
+
+348 tests pass against a real PostgreSQL 16, stable across repeated runs, including
 **the spec §44 demonstration scenario end to end**.
 
 Operations: [`docs/07-operations.md`](docs/07-operations.md).
 Security: [`docs/08-security-review.md`](docs/08-security-review.md).
 
-> **One known gap.** No `ANTHROPIC_API_KEY` has been configured, so the model client is
-> written but has never run — everything around it is tested with a scripted model, and
-> `npm run eval:live` is ready for the day a key exists.
-> See `docs/06-implementation-log.md` -> M5.
+> **One known gap.** No `ANTHROPIC_API_KEY` has been configured, so the Claude client is
+> written but has never run. The product does not wait on it: `AI_PROVIDER` defaults to
+> the scripted assistant, which drives the same 22 tools against the same data. What
+> remains unmeasured is the model's own judgement — `npm run eval:live` is built, metered
+> and capped at $2.00 for the day a key exists.
+> See `docs/06-implementation-log.md` -> M8.
 
-## Quick start
+## Run it on your machine
+
+You need **Node 20.11+** and **PostgreSQL 16**. No API key: without one the assistant
+runs its scripted implementation, on the same tools and the same data.
 
 ```bash
+git clone https://github.com/V1ddyD/Claude.git sinclair && cd sinclair
 npm install
-cp .env.example .env.local        # set ANTHROPIC_API_KEY here, once
-./scripts/test-db.sh start        # throwaway Postgres; writes .env.test.local
-npm run db:migrate
+
+docker compose up -d              # PostgreSQL on 127.0.0.1:5432
+cp .env.example .env.local        # the defaults match docker compose
+
+npm run db:migrate                # 47 tables, RLS, roles
 npm run db:seed                   # 10 models, 36 configurations, 86 units
-npm test
-npm run dev                       # site at /, portal at /portal
+npm run dev
+```
+
+Then open:
+
+| | |
+|---|---|
+| **http://localhost:3000** | the customer site. The assistant is the button at the bottom right |
+| **http://localhost:3000/models** | the range, priced from the catalogue |
+| **http://localhost:3000/portal** | the Dealer Portal — click a seeded name to sign in |
+
+Sign in as **Marcus Hale** (sales) or **Priya Raman** (manager) and you will see the
+lead your own conversation just created, with the evidence behind its priority, the
+appointment, the ticket and the full transcript.
+
+Something worth trying: book a test drive in the chat, then open the portal. The
+conversation is what filled it in.
+
+### Without Docker
+
+Any PostgreSQL 16 works. Create a database, then point `.env.local` at it:
+
+```
+DATABASE_URL=postgres://app_user@localhost:5432/sinclair
+DATABASE_ADMIN_URL=postgres://postgres@localhost:5432/sinclair
+```
+
+`DATABASE_ADMIN_URL` is the owner and runs migrations; `DATABASE_URL` is the
+unprivileged role the application uses, created by migration `0002`. They are
+deliberately different — tenant isolation depends on the second one not being the owner.
+If your server requires passwords, give the role one after migrating
+(`ALTER ROLE app_user PASSWORD '…'`) and put it in the URL.
+
+On Linux, `./scripts/test-db.sh start` stands up a throwaway cluster instead and writes
+the URLs to `.env.test.local`. That is what CI and `npm test` use.
+
+```bash
+npm test                          # 348 tests against a real PostgreSQL
+npm run eval                      # measures the system
+npm run eval:rules                # measures the assistant that ships today
 ```
 
 ### The assistant's API key
@@ -97,8 +150,10 @@ alias, and never reaches the browser. Three independent things enforce that: an 
 restricted-import rule, `tests/unit/key-never-reaches-customer.test.ts`, and a CI grep
 of the built client bundle.
 
-Without a key the assistant degrades to a contact form and says so in plain language.
-It never shows a customer anything about configuration.
+Without a key the scripted assistant answers instead — the same tools, the same live
+data, a fixed set of instructions rather than a model. Set `AI_PROVIDER=anthropic` and a
+key to switch; nothing else about the site, the backend or the portal changes. A customer
+is never shown anything about configuration either way.
 
 Without Supabase configured, the portal signs in against seeded staff accounts.
 That adapter replaces the identity provider only — roles, permissions and tenant
