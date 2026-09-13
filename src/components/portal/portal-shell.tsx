@@ -47,12 +47,9 @@ export function PortalShell({
   brandName: string;
   children: React.ReactNode;
 }) {
-  const visible = NAV.filter(
-    (item) =>
-      staff.can(item.permission) ||
-      // Managers and admins hold the broader `lead.read.all` instead.
-      (item.permission === 'lead.read.assigned' && staff.can('lead.read.all')),
-  );
+  // `can` already accounts for a broader grant standing in for a narrower one
+  // — a manager holds `lead.read.all`, which is `lead.read.assigned` and more.
+  const visible = NAV.filter((item) => staff.can(item.permission));
 
   return (
     <div className="min-h-screen bg-ink-50">

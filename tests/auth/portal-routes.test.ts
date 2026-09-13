@@ -63,6 +63,35 @@ describe('portal routes', () => {
   });
 });
 
+describe('the dashboard', () => {
+  /**
+   * Signing in lands everyone on /portal. If that page demands one feature's
+   * permission, the roles without it sign in successfully and are shown an
+   * error — which is what happened to every manager, admin and service advisor
+   * while the dashboard asked for `lead.read.assigned`.
+   *
+   * It must still authorize: being a member of staff is the requirement. What
+   * it SHOWS is decided panel by panel with `staff.can`.
+   */
+  const source = readFileSync(join(PORTAL_DIR, 'portal/(dashboard)/page.tsx'), 'utf8');
+
+  it('authorizes itself', () => {
+    expect(/\b(requireStaff|withStaff)\b/.test(source)).toBe(true);
+  });
+
+  it('does not demand a feature permission to render', () => {
+    const demanded = source.match(/withStaff\(\s*'([^']+)'/)?.[1];
+    expect(
+      demanded,
+      `the landing page requires '${demanded}', so roles without it get an error page`,
+    ).toBeUndefined();
+  });
+
+  it('decides its lead panels by capability instead', () => {
+    expect(source).toMatch(/can\('lead\.read\.assigned'\)/);
+  });
+});
+
 describe('the sign-in route', () => {
   it('is the only public portal route', () => {
     const publicish = walk(PORTAL_DIR).filter((file) => {

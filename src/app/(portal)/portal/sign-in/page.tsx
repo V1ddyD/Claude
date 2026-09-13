@@ -23,8 +23,23 @@ export const metadata = { title: 'Sign in' };
  * account must still exist and be active in `staff_users`, and every
  * permission check downstream is unchanged. It refuses to load in production.
  */
-export default async function SignInPage() {
+/** What a rejected sign-in is told. Never which part was wrong. */
+const ERRORS: Record<string, string> = {
+  'wrong-password': 'That password was not right. Please try again.',
+  'unknown-account': 'That account is no longer available. Choose another.',
+};
+
+export default async function SignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
   if (await getAuthSubject()) redirect('/portal');
+
+  // A rejected sign-in redirects back here with a reason. Without rendering it
+  // the page looked identical to the one just submitted, so a wrong password
+  // was indistinguishable from the portal being broken.
+  const error = ERRORS[(await searchParams).error ?? ''];
 
   if (!devAuth.enabled) {
     return (
@@ -86,6 +101,15 @@ export default async function SignInPage() {
       {features.demoPortal && (
         <p className="mt-4 text-sm text-ink-500">
           The portal shows enquiries left by visitors, so it is password protected.
+        </p>
+      )}
+
+      {error && (
+        <p
+          role="alert"
+          className="mt-4 border-l-2 border-accent-600 bg-ink-50 px-3 py-2 text-sm text-accent-600"
+        >
+          {error}
         </p>
       )}
 

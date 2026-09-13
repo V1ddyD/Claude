@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { staffUsers, type StaffRole } from '@/server/db/schema';
 import { withAuthSubject, withTenant, type TenantDb } from '@/server/db/tenant-db';
 import { getAuthSubject } from '@/server/auth/session';
-import { ROLE_PERMISSIONS, type Permission } from '@/server/auth/permissions';
+import { effectivePermissions, type Permission } from '@/server/auth/permissions';
 import { forbidden, unauthenticated } from '@/server/errors';
 
 /**
@@ -59,7 +59,7 @@ export async function requireStaff(permission?: Permission): Promise<StaffContex
     throw forbidden({ authUserId: subject.authUserId, reason: !staff ? 'no-staff-row' : staff.status });
   }
 
-  const granted = new Set<Permission>(ROLE_PERMISSIONS[staff.role]);
+  const granted = effectivePermissions(staff.role);
   const ctx: StaffContext = {
     authUserId: staff.id,
     tenantId: staff.tenantId,
@@ -79,11 +79,27 @@ export async function requireStaff(permission?: Permission): Promise<StaffContex
 /**
  * The normal way a portal feature reads or writes: authorize, then open a
  * transaction already scoped to the staff member's own tenant.
+ *
+ * The permission is optional, for the pages every signed-in member of staff
+ * may open — the dashboard among them. Such a page still authorizes: being
+ * staff at all is the requirement, and what it shows is decided per panel by
+ * `staff.can`. Demanding one feature's permission to render a landing page
+ * turned it into an error page for everyone who does not work on that feature.
  */
+export async function withStaff<T>(
+  fn: (db: TenantDb, staff: StaffContext) => Promise<T>,
+): Promise<T>;
 export async function withStaff<T>(
   permission: Permission,
   fn: (db: TenantDb, staff: StaffContext) => Promise<T>,
+): Promise<T>;
+export async function withStaff<T>(
+  permissionOrFn: Permission | ((db: TenantDb, staff: StaffContext) => Promise<T>),
+  maybeFn?: (db: TenantDb, staff: StaffContext) => Promise<T>,
 ): Promise<T> {
+  const permission = typeof permissionOrFn === 'function' ? undefined : permissionOrFn;
+  const fn = typeof permissionOrFn === 'function' ? permissionOrFn : maybeFn!;
+
   const staff = await requireStaff(permission);
   return withTenant({ tenantId: staff.tenantId, authUserId: staff.authUserId }, (db) =>
     fn(db, staff),

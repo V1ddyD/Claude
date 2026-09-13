@@ -73,6 +73,40 @@ export const ROLE_PERMISSIONS: Record<StaffRole, readonly Permission[]> = {
   ],
 };
 
+/**
+ * Grants that already contain a narrower one.
+ *
+ * `lead.read.all` and `lead.read.assigned` are the same capability at two
+ * widths: one sees every lead, the other only its own. A guard asking for the
+ * narrow one is asking "may you read leads at all", and a manager who may read
+ * ALL of them plainly may — but the matrix lists the two side by side, so
+ * holding the broader grant did not satisfy the narrower guard and the
+ * dashboard threw FORBIDDEN at every manager and admin.
+ *
+ * The implication belongs here, once, rather than as a special case at each
+ * place that asks. It only ever widens what a role can do, never narrows it,
+ * and it is deliberately not folded into `ROLE_PERMISSIONS` — that stays a
+ * literal mirror of what migration 0002 seeds.
+ */
+const IMPLIES: Partial<Record<Permission, readonly Permission[]>> = {
+  'lead.read.all': ['lead.read.assigned'],
+};
+
+/** Everything a role may do, including what its grants imply. */
+export function effectivePermissions(role: StaffRole): Set<Permission> {
+  const granted = new Set<Permission>(ROLE_PERMISSIONS[role]);
+  for (const held of ROLE_PERMISSIONS[role]) {
+    for (const implied of IMPLIES[held] ?? []) granted.add(implied);
+  }
+  return granted;
+}
+
+/**
+ * Whether the matrix lists this permission against this role.
+ *
+ * Literal, so it stays comparable with the database seed — use
+ * `effectivePermissions` to decide whether someone may actually do something.
+ */
 export function roleHas(role: StaffRole, permission: Permission): boolean {
   return ROLE_PERMISSIONS[role].includes(permission);
 }

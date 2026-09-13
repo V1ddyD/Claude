@@ -21,22 +21,34 @@ const PENDING = [
   { title: 'Conversion', arrives: 'M6' },
 ];
 
+/**
+ * Every signed-in member of staff may open the dashboard; what it shows is
+ * decided panel by panel. A service advisor holds no lead permission, and
+ * requiring one here meant they signed in successfully and were shown an error
+ * page — the one screen everybody lands on was the one screen some of them
+ * could not see.
+ */
 export default async function DashboardPage() {
-  const { counts, followUps, staff } = await withStaff(
-    'lead.read.assigned',
-    async (db, currentStaff) => ({
-      counts: await countByPriority(db, currentStaff),
-      followUps: await listDueFollowUps(
-        db,
-        currentStaff.authUserId,
-        currentStaff.can('lead.read.all'),
-      ),
+  const { leads, staff } = await withStaff(async (db, currentStaff) => {
+    const seesLeads = currentStaff.can('lead.read.assigned');
+
+    return {
+      leads: seesLeads
+        ? {
+            counts: await countByPriority(db, currentStaff),
+            followUps: await listDueFollowUps(
+              db,
+              currentStaff.authUserId,
+              currentStaff.can('lead.read.all'),
+            ),
+          }
+        : null,
       staff: {
         fullName: currentStaff.fullName,
         seesAll: currentStaff.can('lead.read.all'),
       },
-    }),
-  );
+    };
+  });
 
   return (
     <>
@@ -45,28 +57,36 @@ export default async function DashboardPage() {
           Good afternoon, {staff.fullName.split(' ')[0]}
         </h1>
         <p className="text-sm text-ink-500">
-          {staff.seesAll ? 'All dealership leads' : 'Your assigned leads'}
+          {leads ? (staff.seesAll ? 'All dealership leads' : 'Your assigned leads') : 'Service desk'}
         </p>
       </div>
 
       <div className="mt-8 grid gap-px overflow-hidden rounded border border-ink-100 bg-ink-100 sm:grid-cols-2 lg:grid-cols-3">
-        <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
-          <p className="text-xs uppercase tracking-wider text-ink-500">High priority</p>
-          <p className="mt-3 text-2xl font-medium tabular-nums text-[color:var(--color-signal-high)]">
-            {counts.high}
-          </p>
-          <p className="mt-1 text-xs text-ink-500">Open leads needing a call</p>
-        </Link>
-        <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
-          <p className="text-xs uppercase tracking-wider text-ink-500">Medium priority</p>
-          <p className="mt-3 text-2xl font-medium tabular-nums text-ink-900">{counts.medium}</p>
-          <p className="mt-1 text-xs text-ink-500">Worth following up</p>
-        </Link>
-        <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
-          <p className="text-xs uppercase tracking-wider text-ink-500">Low priority</p>
-          <p className="mt-3 text-2xl font-medium tabular-nums text-ink-500">{counts.low}</p>
-          <p className="mt-1 text-xs text-ink-500">Nurture</p>
-        </Link>
+        {leads && (
+          <>
+            <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
+              <p className="text-xs uppercase tracking-wider text-ink-500">High priority</p>
+              <p className="mt-3 text-2xl font-medium tabular-nums text-[color:var(--color-signal-high)]">
+                {leads.counts.high}
+              </p>
+              <p className="mt-1 text-xs text-ink-500">Open leads needing a call</p>
+            </Link>
+            <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
+              <p className="text-xs uppercase tracking-wider text-ink-500">Medium priority</p>
+              <p className="mt-3 text-2xl font-medium tabular-nums text-ink-900">
+                {leads.counts.medium}
+              </p>
+              <p className="mt-1 text-xs text-ink-500">Worth following up</p>
+            </Link>
+            <Link href="/portal/leads" className="bg-white p-5 transition-colors hover:bg-ink-50">
+              <p className="text-xs uppercase tracking-wider text-ink-500">Low priority</p>
+              <p className="mt-3 text-2xl font-medium tabular-nums text-ink-500">
+                {leads.counts.low}
+              </p>
+              <p className="mt-1 text-xs text-ink-500">Nurture</p>
+            </Link>
+          </>
+        )}
 
         {PENDING.map((panel) => (
           <div key={panel.title} className="bg-white p-5">
@@ -77,19 +97,27 @@ export default async function DashboardPage() {
         ))}
       </div>
 
+      {!leads && (
+        <p className="mt-8 max-w-2xl text-sm leading-relaxed text-ink-500">
+          Sales leads are not part of your role. The service diary, service
+          tickets and the vehicle records are in the menu above.
+        </p>
+      )}
+
+      {leads && (
       <section className="mt-12">
         <h2 className="text-[11px] uppercase tracking-[0.25em] text-ink-500">
           Follow-ups due
         </h2>
 
-        {followUps.length === 0 ? (
+        {leads.followUps.length === 0 ? (
           <p className="mt-4 text-sm text-ink-500">
             Nothing outstanding. Tasks appear here when a high-priority lead goes
             unanswered, a callback is waiting, or a test drive is tomorrow.
           </p>
         ) : (
           <ul className="mt-4 divide-y divide-ink-100 overflow-hidden rounded border border-ink-100 bg-white">
-            {followUps.map((task) => (
+            {leads.followUps.map((task) => (
               <li key={task.id} className="flex flex-wrap items-center gap-4 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   {/* The action first: staff need to know what to DO, not
@@ -136,6 +164,7 @@ export default async function DashboardPage() {
           </ul>
         )}
       </section>
+      )}
 
       <p className="mt-10 max-w-2xl text-sm leading-relaxed text-ink-500">
         Lead figures and follow-ups are live. The remaining panels stay empty until the
