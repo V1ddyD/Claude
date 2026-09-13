@@ -59,7 +59,20 @@ never advertises what is behind it (spec §35).
 
 ### 3. The scheduler
 
-`vercel.json` calls `/api/cron/worker` every five minutes, authenticated by `CRON_SECRET`.
+Something has to call `/api/cron/worker` every few minutes, authenticated by
+`CRON_SECRET`. Which something depends on the host:
+
+| Host | Schedule | Cadence |
+|---|---|---|
+| GitHub Actions | `.github/workflows/worker.yml` | every 5 minutes, best effort |
+| Vercel | `vercel.json` | once a day — the free plan's limit, a backstop only |
+| Netlify | `netlify.toml` + `netlify/functions/worker.mts` | every 5 minutes |
+
+The workflow is what actually drives the cadence on a free Vercel project, because
+Vercel rejects any cron expression that would run more than once a day on Hobby. It
+needs two things set on the repository: a `SITE_URL` variable and a `CRON_SECRET`
+secret matching the deployment's.
+
 That one call drives everything asynchronous:
 
 | Job | What it does |

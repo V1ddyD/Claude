@@ -1,0 +1,47 @@
+# Drains the job queue on a schedule.
+#
+# The application already exposes the worker at /api/cron/worker, authenticated
+# by CRON_SECRET. What it needs is something to call it every few minutes:
+# queued confirmation emails, follow-up evaluation, expiring resource holds,
+# retention and rate-limit sweeping all wait on that tick.
+#
+# The host's own scheduler would be the natural home, and `vercel.json` has a
+# cron entry for it — but Vercel's free plan permits one invocation per DAY,
+# which is not a schedule a dealership's confirmation emails can live on. So
+# the daily cron stays as a backstop and this drives the real cadence.
+#
+# It holds no logic of its own: it makes one authenticated request and reports
+# what came back. If it ever needs to know something about the work, that is a
+# sign the work belongs in the route, not here.
+name: Worker
+
+on:
+  schedule:
+    # GitHub's minimum, and it is best-effort — runs can be late or skipped
+    # when the service is busy. Every job the worker runs is idempotent, so a
+    # late tick costs freshness, never correctness.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the worker
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$SITE_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "SITE_URL (repository variable) and CRON_SECRET (repository secret) must both be set." >&2
+            exit 1
+          fi
+
+          # --fail-with-body so a 401 or a 503 fails the run AND shows why.
+          curl --fail-with-body --silent --show-error --max-time 60 \
+            -X POST "${SITE_URL%/}/api/cron/worker" \
+            -H "authorization: Bearer $CRON_SECRET"

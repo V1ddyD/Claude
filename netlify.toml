@@ -38,14 +38,18 @@
 # Run the functions next to the database.
 #
 # The database is in ap-southeast-1 and functions default to us-east-2, which
-# makes every query a round trip of roughly a fifth of a second. Reads survive
-# that; committing a test drive — customer, lead, signals, appointment,
-# resource holds, ticket, queued email, audit rows, one transaction — does not,
-# and died on the thirty-second function limit.
+# makes every query a round trip of roughly half a second. Reads survive that;
+# committing a test drive — customer, lead, signals, appointment, resource
+# holds, ticket, queued email, audit rows, one transaction — does not, and died
+# on the thirty-second function limit.
 #
-# Co-locating is the fix. Moving the queries themselves would mean rewriting
-# the booking transaction around a latency budget, which is the wrong thing to
-# design a dealership's booking around.
+# This declaration DOES NOT TAKE EFFECT below Netlify's Enterprise plan. The
+# deploy accepts it and then reports `"functions_region":"cmh"` with an empty
+# `functions_region_overrides`, so the only signal that it was ignored is the
+# latency itself. It is left here because it is correct and costs nothing if
+# the plan ever allows it — but co-location on this repository is achieved by
+# deploying to Vercel, where the free plan does honour a single region and
+# `vercel.json` pins it to sin1, the same ap-southeast-1 the database is in.
 [functions]
   region = "ap-southeast-1"
 

@@ -13,7 +13,26 @@ import { env } from '@/server/config/env';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+/**
+ * Two methods, one handler, because schedulers disagree about which to use.
+ *
+ * Vercel's cron issues a GET and attaches `Authorization: Bearer $CRON_SECRET`
+ * itself. Anything driving this from outside — a workflow, a curl, another
+ * host's scheduler — sends a POST. A GET that changes state is not how this
+ * would be designed from scratch; it is what the platform's scheduler sends,
+ * and an endpoint the scheduler cannot call is a queue nobody drains.
+ *
+ * The secret is required either way, so neither method is a public trigger.
+ */
+export async function GET(request: NextRequest) {
+  return drain(request);
+}
+
 export async function POST(request: NextRequest) {
+  return drain(request);
+}
+
+async function drain(request: NextRequest) {
   const secret = env.CRON_SECRET;
   if (!secret) {
     return NextResponse.json({ error: 'Worker is not configured.' }, { status: 503 });
