@@ -181,7 +181,13 @@ export function Assistant({ brandName, greeting, suggestions = [] }: AssistantPr
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-controls="sinclair-assistant"
-        className="fixed bottom-5 right-5 z-40 flex items-center gap-2.5 rounded-full bg-ink-900 py-3 pl-5 pr-5 text-sm text-white shadow-[0_8px_30px_rgba(0,0,0,0.18)] transition-all hover:bg-ink-800 hover:shadow-[0_10px_36px_rgba(0,0,0,0.24)] sm:bottom-8 sm:right-8"
+        // On a phone the panel fills the screen and this would sit on top of
+        // the message box. The panel's own header carries a close button, so
+        // the launcher steps aside; on a wider screen it sits clear of the
+        // panel and stays.
+        className={`fixed bottom-5 right-5 z-40 items-center gap-2.5 rounded-full bg-ink-900 py-3 pl-5 pr-5 text-sm text-white shadow-[0_8px_30px_rgba(0,0,0,0.18)] transition-all hover:bg-ink-800 hover:shadow-[0_10px_36px_rgba(0,0,0,0.24)] sm:bottom-8 sm:right-8 sm:flex ${
+          open ? 'hidden' : 'flex'
+        }`}
       >
         {open ? (
           <>

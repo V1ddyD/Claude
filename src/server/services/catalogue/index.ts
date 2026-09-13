@@ -22,7 +22,11 @@ export async function getModelDetail(tenantId: string, slug: string) {
     const model = await catalogue.getModelBySlug(db, slug);
     if (!model) throw notFound('That model');
 
-    const configurations = await catalogue.listConfigurations(db, model.id);
+    // Issued together: neither read depends on the other.
+    const [configurations, inStock] = await Promise.all([
+      catalogue.listConfigurations(db, model.id),
+      catalogue.countAvailableUnits(db, model.id),
+    ]);
 
     // Powertrains and trims presented from the matrix rather than listed
     // independently, so the page can never offer a combination that is not built.
@@ -47,7 +51,7 @@ export async function getModelDetail(tenantId: string, slug: string) {
       ),
     }));
 
-    return { model, configurations, powertrains, trims };
+    return { model, configurations, powertrains, trims, inStock };
   });
 }
 

@@ -2,7 +2,7 @@ import 'server-only';
 import { and, eq, asc, sql } from 'drizzle-orm';
 import type { TenantDb } from '@/server/db/tenant-db';
 import {
-  vehicleModels, powertrains, trims, modelConfigurations, colours,
+  vehicleModels, powertrains, trims, modelConfigurations, colours, inventoryUnits,
   colourAvailability, options, optionAvailability, optionRules, vehicleFeatures,
 } from '@/server/db/schema';
 import type { BuildContext } from '@/server/services/pricing';
@@ -28,6 +28,10 @@ export interface ModelSummary {
   tagline: string | null;
   baseMsrpCents: number;
   heroImageUrl: string | null;
+  /** 'ice' | 'hybrid' | 'phev' | 'bev', as offered across this model's builds. */
+  powertrainKinds: string[];
+  /** Units on the floor today. Zero is an answer, not a missing value. */
+  inStock: number;
 }
 
 export async function listModels(db: TenantDb): Promise<ModelSummary[]> {
@@ -43,10 +47,56 @@ export async function listModels(db: TenantDb): Promise<ModelSummary[]> {
       tagline: vehicleModels.tagline,
       baseMsrpCents: vehicleModels.baseMsrpCents,
       heroImageUrl: vehicleModels.heroImageUrl,
+
+      // What a customer scanning the range wants to know before clicking:
+      // what it runs on, and whether one is on the floor today.
+      //
+      // Correlated subqueries rather than joins — joining the configuration
+      // matrix would multiply the row per trim and powertrain, and counting
+      // stock in a second pass would be a second round trip for a number that
+      // belongs on the card.
+      //
+      // The outer columns are written out as `vehicle_models.tenant_id` rather
+      // than interpolated. Interpolating renders them bare here, and a bare
+      // `tenant_id` inside a subquery that has joined two more tenant-scoped
+      // tables is ambiguous — Postgres refuses the query, which is the good
+      // outcome; the bad one is a bare `id` quietly binding to the SUBQUERY's
+      // row and correlating a model to itself.
+      powertrainKinds: sql<string[]>`(
+        SELECT coalesce(array_agg(DISTINCT p.kind ORDER BY p.kind), '{}'::text[])
+        FROM model_configurations mc
+        JOIN powertrains p ON p.id = mc.powertrain_id
+        WHERE mc.tenant_id = vehicle_models.tenant_id
+          AND mc.model_id = vehicle_models.id
+      )`,
+      inStock: sql<number>`(
+        SELECT count(*)::int
+        FROM inventory_units iu
+        JOIN model_configurations mc ON mc.id = iu.model_configuration_id
+        WHERE iu.tenant_id = vehicle_models.tenant_id
+          AND mc.model_id = vehicle_models.id
+          AND iu.status = 'available'
+      )`,
     })
     .from(vehicleModels)
     .where(and(eq(vehicleModels.tenantId, db.tenantId), eq(vehicleModels.status, 'published')))
     .orderBy(asc(vehicleModels.displayOrder), asc(vehicleModels.name));
+}
+
+/** Units of this model on the floor today. Zero is an answer, not an absence. */
+export async function countAvailableUnits(db: TenantDb, modelId: string): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(inventoryUnits)
+    .innerJoin(modelConfigurations, eq(modelConfigurations.id, inventoryUnits.modelConfigurationId))
+    .where(
+      and(
+        eq(inventoryUnits.tenantId, db.tenantId),
+        eq(modelConfigurations.modelId, modelId),
+        eq(inventoryUnits.status, 'available'),
+      ),
+    );
+  return rows[0]?.count ?? 0;
 }
 
 export async function getModelBySlug(db: TenantDb, slug: string) {

@@ -49,13 +49,17 @@ export async function listLeads(db: TenantDb, staff: StaffContext, limit = 50) {
       //
       // The model arrives as the slug the catalogue accepted, so it is
       // resolved to the name staff use rather than shown as `s5`.
+      //
+      // The outer columns are written out rather than interpolated: a bare
+      // `tenant_id` here is ambiguous against the joined tables, and a bare
+      // `id` would bind to the subquery's own row instead of the lead's.
       wants: sql<string | null>`(
         SELECT vm.full_name
         FROM lead_signals ls
         JOIN vehicle_models vm
           ON vm.tenant_id = ls.tenant_id AND vm.slug = ls.value #>> '{}'
-        WHERE ls.tenant_id = ${leads.tenantId}
-          AND ls.lead_id = ${leads.id}
+        WHERE ls.tenant_id = leads.tenant_id
+          AND ls.lead_id = leads.id
           AND ls.field = 'modelSlug'
           AND ls.superseded_at IS NULL
         LIMIT 1
@@ -63,8 +67,8 @@ export async function listLeads(db: TenantDb, staff: StaffContext, limit = 50) {
       bookedAt: sql<Date | null>`(
         SELECT a.starts_at
         FROM appointments a
-        WHERE a.tenant_id = ${leads.tenantId}
-          AND a.lead_id = ${leads.id}
+        WHERE a.tenant_id = leads.tenant_id
+          AND a.lead_id = leads.id
           AND a.status IN ('scheduled', 'confirmed')
         ORDER BY a.starts_at
         LIMIT 1

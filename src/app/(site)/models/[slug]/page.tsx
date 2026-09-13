@@ -26,7 +26,7 @@ export default async function ModelPage({ params }: { params: Promise<{ slug: st
     throw error;
   }
 
-  const { model, powertrains, trims, configurations } = detail;
+  const { model, powertrains, trims, configurations, inStock } = detail;
   const money = (cents: number) => formatMoney(cents, tenant.currency, tenant.locale);
 
   return (
@@ -40,10 +40,29 @@ export default async function ModelPage({ params }: { params: Promise<{ slug: st
           {model.tagline && (
             <p className="mt-4 max-w-xl text-lg leading-relaxed text-ink-500">{model.tagline}</p>
           )}
-          <p className="mt-6 text-sm tabular-nums text-ink-900">
-            From {money(model.baseMsrpCents)}
-          </p>
-          <div className="mt-8 aspect-[21/9] w-full bg-gradient-to-br from-ink-100 to-ink-50" />
+          <div className="mt-6 flex flex-wrap items-center gap-4">
+            <p className="text-sm tabular-nums text-ink-900">
+              From {money(model.baseMsrpCents)}
+            </p>
+            <span className="text-ink-300">·</span>
+            <p className="text-sm text-ink-500">
+              {inStock > 0
+                ? `${inStock} on the floor today`
+                : 'None on the floor today — ask about lead times'}
+            </p>
+          </div>
+
+          {/* No photography exists for this catalogue, so the space carries the
+              nameplate rather than a picture-shaped hole. A real render belongs
+              exactly here. */}
+          <div className="mt-8 flex aspect-[21/9] w-full items-center justify-center overflow-hidden rounded bg-gradient-to-br from-ink-100 to-ink-50">
+            <span
+              aria-hidden
+              className="select-none text-6xl font-medium tracking-[0.2em] text-ink-300 sm:text-8xl"
+            >
+              {model.name.toUpperCase()}
+            </span>
+          </div>
           {model.overview && (
             <p className="mt-8 max-w-2xl leading-relaxed text-ink-500">{model.overview}</p>
           )}
