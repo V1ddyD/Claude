@@ -1,11 +1,11 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { NextResponse, after, type NextRequest } from 'next/server';
 import { cookies, headers } from 'next/headers';
 import { z } from 'zod';
 import { resolveTenantByHost } from '@/server/context/tenant';
 import { openConversation } from '@/server/ai/extraction';
 import { respondToMessage } from '@/server/ai/conversation';
 import { withTenant } from '@/server/db/tenant-db';
-import { enqueue } from '@/server/jobs';
+import { enqueue, runWorker } from '@/server/jobs';
 import { createHash } from 'node:crypto';
 import { toPublicError, isAppError, AppError } from '@/server/errors';
 import { checkRateLimit } from '@/server/services/limits';
@@ -169,6 +169,30 @@ export async function POST(request: NextRequest) {
       );
       return response;
     };
+
+    // Drain the queue once the reply has gone out.
+    //
+    // Extraction and scoring are queued, and a lead that is never scored has no
+    // priority and no summary — the two things the portal exists to show. That
+    // depended entirely on a scheduler running somewhere, and on a free plan
+    // there may not be one: Vercel permits a cron once a DAY, so a lead could
+    // sit unscored until tomorrow, and a dealership would open the portal to a
+    // list of "low priority, no summary" and conclude the product does not work.
+    //
+    // `after` runs once the response is finished, so this costs the customer
+    // nothing. Jobs are claimed with FOR UPDATE SKIP LOCKED, so concurrent
+    // turns cannot process the same job twice. The scheduled worker still
+    // exists for what traffic does not cover — expiring holds on a quiet day,
+    // retention, sweeping rate limits.
+    after(async () => {
+      try {
+        await runWorker();
+      } catch (error) {
+        // Never surfaced: the customer's reply has already been delivered, and
+        // a queue that failed to drain is an operational problem, not theirs.
+        console.error(`[chat:worker] ${requestId}`, error);
+      }
+    });
 
     if (parsed.data.stream) {
       return setVisitorCookie(
