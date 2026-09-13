@@ -36,9 +36,39 @@ export async function listLeads(db: TenantDb, staff: StaffContext, limit = 50) {
       budgetCents: leads.budgetCents,
       purchaseTimeframe: leads.purchaseTimeframe,
       aiSummary: leads.aiSummary,
+      financeInterest: leads.financeInterest,
+      tradeInInterest: leads.tradeInInterest,
       assignedTo: staffUsers.fullName,
       lastActivityAt: leads.lastActivityAt,
       createdAt: leads.createdAt,
+
+      // What they are actually shopping for, and whether it is already in the
+      // diary. Both are correlated subqueries rather than joins: a join on
+      // signals would multiply the row per signal, and a second query would be
+      // a second round trip for a column.
+      //
+      // The model arrives as the slug the catalogue accepted, so it is
+      // resolved to the name staff use rather than shown as `s5`.
+      wants: sql<string | null>`(
+        SELECT vm.full_name
+        FROM lead_signals ls
+        JOIN vehicle_models vm
+          ON vm.tenant_id = ls.tenant_id AND vm.slug = ls.value #>> '{}'
+        WHERE ls.tenant_id = ${leads.tenantId}
+          AND ls.lead_id = ${leads.id}
+          AND ls.field = 'modelSlug'
+          AND ls.superseded_at IS NULL
+        LIMIT 1
+      )`,
+      bookedAt: sql<Date | null>`(
+        SELECT a.starts_at
+        FROM appointments a
+        WHERE a.tenant_id = ${leads.tenantId}
+          AND a.lead_id = ${leads.id}
+          AND a.status IN ('scheduled', 'confirmed')
+        ORDER BY a.starts_at
+        LIMIT 1
+      )`,
     })
     .from(leads)
     .innerJoin(customers, eq(customers.id, leads.customerId))

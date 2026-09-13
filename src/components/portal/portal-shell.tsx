@@ -11,23 +11,23 @@ import type { Permission } from '@/server/auth/permissions';
  * permission updates the navigation for free. Hiding a link is presentation,
  * not protection — every destination re-checks with requireStaff().
  *
- * Sections not yet built render as disabled rather than as links. Linking to a
- * page that does not exist would make the portal look finished and leave staff
- * clicking into errors; `typedRoutes` makes the distinction a compile error.
+ * Only sections that exist appear. There used to be three more, greyed out and
+ * titled "Available in M2" — a milestone number from the people building the
+ * software, on the navigation of a dealership who has never seen the plan. A
+ * menu that is half unusable reads as a portal that is half broken.
  */
 
-type NavItem =
-  | { label: string; permission: Permission; href: Route }
-  | { label: string; permission: Permission; arrives: string };
+interface NavItem {
+  label: string;
+  permission: Permission;
+  href: Route;
+}
 
 const NAV: NavItem[] = [
   { label: 'Dashboard', permission: 'customer.read', href: '/portal' },
   { label: 'Leads', permission: 'lead.read.assigned', href: '/portal/leads' },
   { label: 'Appointments', permission: 'appointment.read', href: '/portal/appointments' },
   { label: 'Tickets', permission: 'customer.read', href: '/portal/tickets' },
-  { label: 'Inventory', permission: 'inventory.read', arrives: 'M2' },
-  { label: 'Analytics', permission: 'analytics.read', arrives: 'M5' },
-  { label: 'Settings', permission: 'settings.write', arrives: 'M5' },
 ];
 
 const ROLE_LABEL: Record<string, string> = {
@@ -63,26 +63,15 @@ export function PortalShell({
           </span>
 
           <nav className="ml-auto flex items-center gap-5">
-            {visible.map((item) =>
-              'href' in item ? (
-                <Link
-                  key={item.label}
-                  href={item.href}
-                  className="text-sm text-ink-900 transition-colors hover:text-accent-500"
-                >
-                  {item.label}
-                </Link>
-              ) : (
-                <span
-                  key={item.label}
-                  title={`Available in ${item.arrives}`}
-                  aria-disabled="true"
-                  className="hidden cursor-default text-sm text-ink-300 lg:inline"
-                >
-                  {item.label}
-                </span>
-              ),
-            )}
+            {visible.map((item) => (
+              <Link
+                key={item.label}
+                href={item.href}
+                className="text-sm text-ink-900 transition-colors hover:text-accent-500"
+              >
+                {item.label}
+              </Link>
+            ))}
             <span className="border-l border-ink-100 pl-5 text-right leading-tight">
               <span className="block text-sm text-ink-900">{staff.fullName}</span>
               <span className="block text-[11px] uppercase tracking-wider text-ink-500">
