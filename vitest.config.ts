@@ -2,10 +2,16 @@ import { defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
 
 export default defineConfig({
+  // Components are authored for Next.js, which injects the JSX runtime. Vitest
+  // compiles them on its own, so it has to be told the same thing.
+  esbuild: { jsx: 'automatic' },
   test: {
     environment: 'node',
     setupFiles: ['tests/setup.ts'],
-    include: ['tests/**/*.test.ts'],
+    // `.tsx` too: what a customer reads is rendered by a component, and a
+    // renderer that turns a reply into markup is worth testing like anything
+    // else that handles text somebody else wrote.
+    include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
     // Integration and isolation tests share one database; running files in
     // parallel would let one suite's fixtures race another's assertions.
     fileParallelism: false,

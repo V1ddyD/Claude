@@ -36,3 +36,18 @@ body { background: var(--color-ink-50); color: var(--color-ink-900); }
   outline: 2px solid var(--color-accent-500);
   outline-offset: 2px;
 }
+
+/*
+ * Opt out where the CONTAINER shows the focus instead.
+ *
+ * A message box is a textarea inside a bordered well; ringing the textarea
+ * leaves a second box inside the first, in the accent red, which reads as an
+ * error rather than as focus. The element opting out must give focus somewhere
+ * to show — this is not a licence to remove the indicator.
+ *
+ * A data attribute rather than a utility class: this rule is unlayered, so it
+ * beats anything Tailwind emits and cannot be overridden from the markup.
+ */
+[data-focus-ring='container']:focus-visible {
+  outline: none;
+}

@@ -6,6 +6,7 @@ import { allowedNextStatuses } from '@/server/services/leads/actions';
 import { staffUsers } from '@/server/db/schema';
 import { changeStatusAction, assignLeadAction, addNoteAction } from './actions';
 import { PriorityBadge } from '@/components/portal/priority-badge';
+import { RichText } from '@/components/rich-text';
 import { formatMoney } from '@/server/services/pricing';
 
 export const dynamic = 'force-dynamic';
@@ -94,9 +95,10 @@ export default async function LeadPage({
             {transcript.map((message, i) =>
               message.role === 'tool' ? (
                 // Shown, but visibly secondary: staff should be able to see
-                // what the assistant looked up without it dominating the thread.
+                // what the assistant did without it dominating the thread — and
+                // in words, not the name of the function that did it.
                 <p key={i} className="pl-4 text-xs text-ink-300">
-                  looked up {message.toolName}
+                  {describeTool(message.toolName)}
                 </p>
               ) : (
                 <div
@@ -110,9 +112,13 @@ export default async function LeadPage({
                   <p className="text-[11px] uppercase tracking-wider text-ink-500">
                     {message.role === 'user' ? 'Customer' : 'Assistant'}
                   </p>
-                  <p className="mt-1 whitespace-pre-wrap leading-relaxed text-ink-900">
-                    {message.content}
-                  </p>
+                  <div className="mt-1 leading-relaxed text-ink-900">
+                    {message.role === 'user' ? (
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                    ) : (
+                      <RichText text={message.content ?? ''} />
+                    )}
+                  </div>
                 </div>
               ),
             )}
@@ -306,17 +312,77 @@ function Row({ label, value }: { label: string; value: string | null }) {
   );
 }
 
+/**
+ * What the extracted fields are called on screen.
+ *
+ * The names in the table are the names in the code — `modelSlug`,
+ * `testDriveRequested`, `budgetCents` — and splitting them on capitals gives
+ * "Model Slug" and "Budget Cents", which is a schema, not a briefing. Anything
+ * not listed falls back to the split, so a new signal is readable the day it is
+ * added rather than invisible.
+ */
+const FIELD_LABELS: Record<string, string> = {
+  modelSlug: 'Vehicle',
+  trimCode: 'Trim',
+  powertrainCode: 'Engine',
+  exteriorColourCode: 'Colour',
+  budgetCents: 'Budget',
+  purchaseTimeframe: 'Timeframe',
+  financeInterest: 'Financing',
+  tradeInInterest: 'Trade-in',
+  customerName: 'Name',
+  customerEmail: 'Email',
+  customerPhone: 'Phone',
+  testDriveRequested: 'Test drive',
+  testDriveDate: 'Preferred time',
+  wantsSalesperson: 'Wants a person',
+};
+
+/** What the assistant did, rather than which function it called. */
+const TOOL_ACTIONS: Record<string, string> = {
+  searchVehicles: 'searched the range',
+  getVehicle: 'pulled up the details',
+  getVehiclePowertrains: 'checked the engines',
+  getVehicleTrims: 'checked the trims',
+  getVehicleColours: 'checked the colours',
+  getVehicleOptions: 'checked the options',
+  getVehicleFeatures: 'checked the specification',
+  priceBuild: 'priced the build',
+  estimateFinancing: 'worked out a finance estimate',
+  checkInventory: 'checked what is in stock',
+  getAvailableTestDriveSlots: 'checked the diary',
+  createTestDrive: 'booked the test drive',
+  cancelTestDrive: 'cancelled the test drive',
+  createCallbackRequest: 'logged a callback request',
+  createTradeInRequest: 'logged a trade-in appraisal',
+  createFinancingRequest: 'logged a financing enquiry',
+  createSupportTicket: 'raised an enquiry',
+  requestHumanHandoff: 'passed this to a specialist',
+  saveBuild: 'saved the build',
+  getSavedBuild: 'reopened a saved build',
+};
+
+function describeTool(toolName: string | null): string {
+  if (!toolName) return 'looked something up';
+  return TOOL_ACTIONS[toolName] ?? 'looked something up';
+}
+
 function humanise(field: string): string {
-  return field
-    .replace(/([A-Z])/g, ' $1')
-    .replace(/^./, (c) => c.toUpperCase())
-    .replace(/ Cents$/, '');
+  return (
+    FIELD_LABELS[field] ??
+    field
+      .replace(/([A-Z])/g, ' $1')
+      .replace(/^./, (c) => c.toUpperCase())
+      .replace(/ Cents$/, '')
+  );
 }
 
 function formatValue(field: string, value: unknown): string {
   if (field === 'budgetCents' && typeof value === 'number') {
     return formatMoney(value, 'CAD', 'en-CA');
   }
+  // A model arrives as the slug the catalogue accepted. Staff call it the S5.
+  if (field === 'modelSlug' && typeof value === 'string') return value.toUpperCase();
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'string') return value.replace(/_/g, ' ');
   return String(value);
