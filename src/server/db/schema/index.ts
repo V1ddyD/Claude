@@ -10,6 +10,7 @@ export * from './identity';
 export * from './catalogue';
 export * from './inventory';
 export * from './conversations';
+export * from './channels';
 export * from './leads';
 export * from './appointments';
 export * from './tickets';

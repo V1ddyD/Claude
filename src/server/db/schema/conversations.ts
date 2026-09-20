@@ -10,9 +10,17 @@ export const conversations = pgTable(
     tenantId: uuid('tenant_id').notNull(),
     visitorId: uuid('visitor_id'),
     customerId: uuid('customer_id'),
-    channel: text('channel').notNull().default('web').$type<'web' | 'portal' | 'email'>(),
+    channel: text('channel').notNull().default('web')
+      .$type<'web' | 'portal' | 'email' | 'instagram' | 'messenger' | 'whatsapp'>(),
     status: text('status').notNull().default('active')
       .$type<'active' | 'idle' | 'handed_off' | 'closed'>(),
+    /**
+     * Set when a person took the thread over. Read at the top of the
+     * conversation loop: the assistant stops answering rather than talking
+     * over the salesperson in a thread the customer is watching.
+     */
+    handedOffAt: timestamp('handed_off_at', { withTimezone: true }),
+    handedOffTo: uuid('handed_off_to'),
     locale: text('locale').notNull().default('en-CA'),
     rollingSummary: text('rolling_summary'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),

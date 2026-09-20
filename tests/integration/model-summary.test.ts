@@ -66,8 +66,17 @@ describe('what a model card says', () => {
       expect.soft(model?.inStock, `stock for ${row.slug}`).toBe(row.available);
     }
 
-    // A model with none on the floor is a real answer the card renders.
-    expect(models.some((m) => m.inStock === 0)).toBe(true);
+    // "None on the floor" must arrive as the number 0, not as null or a
+    // missing field — the card renders what it is given, and an absent count
+    // renders as nothing at all.
+    //
+    // Asserting that some model HAPPENS to have zero stock would test the
+    // seed, not the query: on a freshly seeded database every published model
+    // has a unit, and the assertion only ever passed on the residue of earlier
+    // runs in a long-lived test database.
+    for (const model of models) {
+      expect.soft(typeof model.inStock, `stock type for ${model.slug}`).toBe('number');
+    }
   });
 
   it('counts only this dealership\'s stock', async () => {
