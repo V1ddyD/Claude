@@ -2,10 +2,13 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import type { Sql } from 'postgres';
 import { prepareDatabase, adminConnection } from '../helpers/db';
 import { ScriptedModel } from '../helpers/scripted-model';
-import { SINCLAIR_TENANT_ID } from '../../db/seeds/sinclair';
+import { SINCLAIR_TENANT_ID, NORTHWIND_TENANT_ID } from '../../db/seeds/sinclair';
 import { closeConnections } from '../../src/server/db/client';
 import { setModelClient } from '../../src/server/ai/client';
 import { receiveChannelMessage } from '../../src/server/channels/inbound';
+import {
+  connectChannelAccount, listChannelAccounts, disconnectChannelAccount,
+} from '../../src/server/channels/accounts';
 import { drainChannelOutbox } from '../../src/server/channels/outbox';
 import {
   setChannelProvider, resetChannelProvider,
@@ -310,5 +313,157 @@ describe('the outbound outbox', () => {
     // went quiet for a day, which is not an outage and not our bug. Retrying
     // cannot succeed — the window only reopens when they write again.
     expect(row?.status).toBe('expired');
+  });
+});
+
+describe('connecting an account', () => {
+  /** Its own account id per case, so cases cannot collide on the global key. */
+  const account = (suffix: string) => `${ACCOUNT}-${RUN}-${suffix}`;
+
+  it('is what makes a webhook resolvable at all', async () => {
+    setModelClient(new ScriptedModel([{ text: 'Connected and answering.' }]));
+    const id = account('new');
+    const { sender, mid } = nextIds();
+
+    const before = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: id,
+      externalUserId: sender,
+      externalMessageId: `${mid}.before`,
+      text: 'anyone there?',
+      requestId: 'test',
+    });
+    // Nobody owns it yet, so the message belongs to no dealership.
+    expect(before.status).toBe('unknown_account');
+
+    await connectChannelAccount({
+      tenantId: SINCLAIR_TENANT_ID,
+      channel: 'instagram',
+      externalAccountId: id,
+      accessToken: 'token-from-meta',
+      displayName: 'Sinclair Motors',
+    });
+
+    const after = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: id,
+      externalUserId: sender,
+      externalMessageId: `${mid}.after`,
+      text: 'anyone there?',
+      requestId: 'test',
+    });
+    expect(after.status).toBe('replied');
+  });
+
+  it('replaces the token when the same account reconnects', async () => {
+    const id = account('refresh');
+
+    const first = await connectChannelAccount({
+      tenantId: SINCLAIR_TENANT_ID,
+      channel: 'instagram',
+      externalAccountId: id,
+      accessToken: 'the-old-token',
+    });
+
+    // Instagram's long-lived token lasts 60 days, so reconnecting is the
+    // normal case, not an error. If it failed, the only way to refresh a
+    // token would be to delete the account and its history with it.
+    const second = await connectChannelAccount({
+      tenantId: SINCLAIR_TENANT_ID,
+      channel: 'instagram',
+      externalAccountId: id,
+      accessToken: 'the-new-token',
+      expiresInSeconds: 60 * 24 * 60 * 60,
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.tokenExpiresAt).toBeInstanceOf(Date);
+
+    const [row] = await admin<{ access_token: string }[]>`
+      SELECT access_token FROM channel_accounts WHERE id = ${first.id}
+    `;
+    expect(row?.access_token).toBe('the-new-token');
+  });
+
+  it('refuses an account another dealership already holds', async () => {
+    const id = account('contested');
+
+    await connectChannelAccount({
+      tenantId: SINCLAIR_TENANT_ID,
+      channel: 'instagram',
+      externalAccountId: id,
+      accessToken: 'sinclair-token',
+    });
+
+    // The unique key is global, so without the tenant predicate on the upsert
+    // this would silently hand Sinclair's Instagram account to Northwind —
+    // who would then answer Sinclair's customers with Northwind's cars.
+    await expect(
+      connectChannelAccount({
+        tenantId: NORTHWIND_TENANT_ID,
+        channel: 'instagram',
+        externalAccountId: id,
+        accessToken: 'northwind-token',
+      }),
+    ).rejects.toThrow(/another tenant/);
+
+    const [row] = await admin<{ tenant_id: string; access_token: string }[]>`
+      SELECT tenant_id, access_token FROM channel_accounts
+      WHERE channel = 'instagram' AND external_account_id = ${id}
+    `;
+    expect(row?.tenant_id).toBe(SINCLAIR_TENANT_ID);
+    expect(row?.access_token).toBe('sinclair-token');
+  });
+
+  it('never hands back the token it was given', async () => {
+    const id = account('opaque');
+
+    const connected = await connectChannelAccount({
+      tenantId: SINCLAIR_TENANT_ID,
+      channel: 'instagram',
+      externalAccountId: id,
+      accessToken: 'a-secret-token',
+    });
+
+    // A response body ends up in logs, proxies and terminal scrollback.
+    expect(JSON.stringify(connected)).not.toContain('a-secret-token');
+
+    const listed = await listChannelAccounts(SINCLAIR_TENANT_ID);
+    expect(JSON.stringify(listed)).not.toContain('a-secret-token');
+    expect(listed.find((a) => a.externalAccountId === id)?.hasToken).toBe(true);
+  });
+
+  it('stops answering once disconnected', async () => {
+    setModelClient(new ScriptedModel([{ text: 'should not be reached' }]));
+    const id = account('gone');
+    const { sender, mid } = nextIds();
+
+    await connectChannelAccount({
+      tenantId: SINCLAIR_TENANT_ID,
+      channel: 'instagram',
+      externalAccountId: id,
+      accessToken: 'token-to-revoke',
+    });
+
+    expect(await disconnectChannelAccount(SINCLAIR_TENANT_ID, 'instagram', id)).toBe(true);
+
+    const outcome = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: id,
+      externalUserId: sender,
+      externalMessageId: mid,
+      text: 'hello?',
+      requestId: 'test',
+    });
+    expect(outcome.status).toBe('unknown_account');
+
+    // Deactivated, not deleted: the conversations it carried are still the
+    // dealership's, and a row that vanishes takes the explanation with it.
+    const [row] = await admin<{ is_active: boolean; access_token: string | null }[]>`
+      SELECT is_active, access_token FROM channel_accounts
+      WHERE channel = 'instagram' AND external_account_id = ${id}
+    `;
+    expect(row?.is_active).toBe(false);
+    expect(row?.access_token).toBeNull();
   });
 });
