@@ -31,6 +31,20 @@ export interface MigrationSource {
  * so it passes the compiled-in copy instead. Same runner, same tracking table,
  * same immutability check either way.
  */
+/**
+ * A fixed advisory-lock key, so only one migration runs at a time.
+ *
+ * Nothing needed this while migrations were a thing a person ran at a
+ * terminal. Once a deployment applies its own, several instances can start at
+ * once and all reach for the same CREATE TABLE — one wins, the rest fail on a
+ * relation that already exists, and a cold start becomes an outage.
+ *
+ * The lock is held on the session, so it is released even if the process dies
+ * mid-migration; the loser then wakes, re-reads schema_migrations and finds
+ * there is nothing left to do.
+ */
+const MIGRATION_LOCK = 8274531109;
+
 export async function migrate(
   connectionString: string,
   opts: { quiet?: boolean; migrations?: MigrationSource[] } = {},
@@ -41,6 +55,10 @@ export async function migrate(
   };
 
   try {
+    // Before anything is read or written: the applied-set is only meaningful
+    // while nobody else is changing it.
+    await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK})`;
+
     await sql`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         name        text PRIMARY KEY,
@@ -88,6 +106,9 @@ export async function migrate(
 
     log(`  up to date (${sources.length} migration${sources.length === 1 ? '' : 's'})`);
   } finally {
+    // Ending the connection would release it anyway; released explicitly so a
+    // pooled or reused connection cannot carry the lock away with it.
+    await sql`SELECT pg_advisory_unlock(${MIGRATION_LOCK})`.catch(() => undefined);
     await sql.end({ timeout: 5 });
   }
 }

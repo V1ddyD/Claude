@@ -22,6 +22,29 @@ import { AppError } from '@/server/errors';
  * mistake — the types simply do not line up.
  */
 
+/**
+ * Bring the schema up to date before the first query touches it.
+ *
+ * Written after a real outage: a build shipped code needing
+ * `conversations.handed_off_at`, the column was never added to the live
+ * database, and every chat turn then asked for something that did not exist.
+ * Nothing in the deployment was wrong — the missing step was one a person had
+ * to remember, and the deployment that needed it had nobody watching.
+ *
+ * Here rather than in `instrumentation.ts`, which would be the obvious home:
+ * Next compiles that file for the edge runtime as well, and follows the
+ * migrator's imports into a bundle that has no `node:fs` — a runtime guard
+ * stops execution, not bundling. This module is server-only and middleware
+ * imports nothing from it, so it never reaches that bundle.
+ *
+ * Costs one already-resolved promise per call after the first, and does
+ * nothing at all on a deployment that has not opted in.
+ */
+async function ensureSchema(): Promise<void> {
+  const { autoMigrate } = await import('./auto-migrate');
+  await autoMigrate();
+}
+
 declare const tenantBrand: unique symbol;
 
 type DrizzleTx = Parameters<Parameters<typeof unscopedDb.transaction>[0]>[0];
@@ -82,6 +105,8 @@ export async function withTenant<T>(
     throw new AppError('UNAUTHENTICATED', 'Invalid session.', { internal: { authUserId } });
   }
 
+  await ensureSchema();
+
   return unscopedDb.transaction(async (tx) => {
     // Privilege first, before anything is read or written.
     await assumeRequestRole(tx);
@@ -133,6 +158,9 @@ export async function withoutTenantScope<T>(
   reason: 'tenant-resolution' | 'staff-signin' | 'worker' | 'migration' | 'health',
   fn: (db: typeof unscopedDb) => Promise<T>,
 ): Promise<T> {
+  // 'migration' is how the migrator itself reaches the database. Waiting for
+  // the schema here would be waiting for itself.
+  if (reason !== 'migration') await ensureSchema();
   void reason;
   // Deliberately not privilege-dropped: these are control-plane operations
   // (resolving a hostname, claiming a job, sweeping counters) and several are

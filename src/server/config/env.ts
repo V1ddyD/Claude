@@ -95,6 +95,15 @@ const schema = z.object({
   /** Required whenever DEMO_MODE is on. Handed to whoever is being shown it. */
   DEMO_PORTAL_PASSWORD: z.string().min(8).optional(),
 
+  /**
+   * Whether a starting server applies pending migrations itself.
+   *
+   * Unset means "a demonstration deployment does, a real one does not", which
+   * is the right default in both directions: a demo has no operator standing
+   * by, and a dealership's live database should change under supervision.
+   */
+  AUTO_MIGRATE: z.enum(['true', 'false']).optional(),
+
   DEFAULT_TENANT_SLUG: z.string().default('sinclair'),
 });
 
