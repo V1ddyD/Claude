@@ -15,6 +15,7 @@ import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 export type JobKind =
   | 'extract_and_score'
   | 'send_email'
+  | 'send_channel_message'
   | 'evaluate_follow_ups'
   | 'apply_retention'
   | 'sweep_rate_limits'

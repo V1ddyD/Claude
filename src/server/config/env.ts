@@ -58,6 +58,21 @@ const schema = z.object({
   RESEND_API_KEY: z.string().optional(),
   RESEND_WEBHOOK_SECRET: z.string().optional(),
 
+  /**
+   * Meta's messaging platforms — Instagram, Messenger, WhatsApp.
+   *
+   * One app secret covers all three, because they are one app. The per-account
+   * send token is NOT here: it belongs to a dealership, not to the deployment,
+   * and lives in `channel_accounts` so a second tenant can be connected
+   * without an environment change.
+   *
+   * The verify token is a string we choose and type into Meta's webhook form.
+   * It authenticates the subscription handshake only — every real delivery is
+   * authenticated by an HMAC signature over the body instead.
+   */
+  META_APP_SECRET: z.string().optional(),
+  META_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
+
   SESSION_SECRET: z.string().min(32).optional(),
   CRON_SECRET: z.string().optional(),
 
@@ -212,6 +227,16 @@ export const features = {
   },
   get email() {
     return Boolean(env.RESEND_API_KEY);
+  },
+  /**
+   * Inbound messaging webhooks are accepted.
+   *
+   * Requires the app secret specifically. Without it a delivery cannot be
+   * authenticated, and an unauthenticated webhook is an anonymous stranger
+   * able to put words in a customer's mouth and read the reply.
+   */
+  get messagingWebhooks() {
+    return Boolean(env.META_APP_SECRET);
   },
   /**
    * The password-gated staff picker is available.

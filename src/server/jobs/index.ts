@@ -4,6 +4,7 @@ import { listActiveTenantIds } from '@/server/db/control-plane';
 import { extractAndScore } from '@/server/ai/extraction';
 import { releaseExpiredReservations } from '@/server/services/inventory';
 import { drainOutbox } from '@/server/services/email/outbox';
+import { drainChannelOutbox } from '@/server/channels/outbox';
 import { evaluateFollowUps } from '@/server/services/follow-ups';
 import { applyRetention } from '@/server/services/retention';
 import { sweepRateLimits } from '@/server/services/limits';
@@ -24,6 +25,13 @@ const HANDLERS: Record<string, (job: Job) => Promise<void>> = {
     // drains whatever is due for the tenant rather than one named message.
     if (!job.tenantId) return;
     await drainOutbox(job.tenantId);
+  },
+
+  send_channel_message: async (job) => {
+    // Same shape as send_email, and for the same reason: the row is a trigger,
+    // the outbox is the truth.
+    if (!job.tenantId) return;
+    await drainChannelOutbox(job.tenantId);
   },
 
   evaluate_follow_ups: async (job) => {

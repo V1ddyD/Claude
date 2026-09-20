@@ -93,9 +93,11 @@ export interface ConversationReply {
    *
    * 'scripted' is the rule-based assistant: real tools and real data, a fixed
    * set of instructions. 'offline' is the contact-form path, where no
-   * assistant answered at all.
+   * assistant answered at all. 'handed_off' is a person having taken the
+   * thread over — the customer's message is recorded and the assistant says
+   * nothing.
    */
-  mode: 'model' | 'scripted' | 'offline';
+  mode: 'model' | 'scripted' | 'offline' | 'handed_off';
   receipt?: Receipt;
 }
 
@@ -150,17 +152,48 @@ export async function respondToMessage(params: {
     // Three independent reads, issued together so the driver pipelines them
     // into one round trip instead of three. See `writeMessages` for why the
     // customer's own message is not written before them.
-    const [{ history, nextSeq }, pinned, catalogueDigest] = await Promise.all([
+    const [{ history, nextSeq }, pinned, catalogueDigest, takeover] = await Promise.all([
       loadHistory(db, params.conversationId),
       // What the customer has already established, so they are never asked
       // twice and an unqualified "the Premium" resolves to the car they are
       // looking at.
       buildPinnedFacts(db, params.conversationId),
       buildCatalogueDigest(db, tenant),
+      // Has a person taken this thread over? Read alongside the others rather
+      // than before them: it is one more column in the same round trip.
+      isHandedOff(db, params.conversationId),
     ]);
 
     const pending = new MessageBuffer(nextSeq);
     pending.add({ role: 'user', content: params.userMessage });
+
+    // A salesperson is handling this conversation. The customer's message is
+    // still recorded — it is theirs, and staff need to see it — but the
+    // assistant does not answer.
+    //
+    // On the website that would merely be untidy. In a messaging thread the
+    // customer is watching, an assistant that keeps talking is talking over
+    // the person who took over, in public, under the dealership's name.
+    if (takeover) {
+      await writeMessages(db, params.conversationId, pending.entries);
+      await db
+        .update(conversations)
+        .set({ lastMessageAt: sql`now()` })
+        .where(
+          and(
+            eq(conversations.tenantId, db.tenantId),
+            eq(conversations.id, params.conversationId),
+          ),
+        );
+
+      return {
+        text: '',
+        conversationId: params.conversationId,
+        toolsUsed: [],
+        degraded: false,
+        mode: 'handed_off',
+      };
+    }
 
     const system = buildSystemPrompt({
       brandName: tenant.brandName,
@@ -372,6 +405,26 @@ class MessageBuffer {
   add(message: Omit<PendingMessage, 'seq'>): void {
     this.entries.push({ ...message, seq: this.seq++ });
   }
+}
+
+/**
+ * Whether a person has taken this conversation over.
+ *
+ * Both signals, because they can disagree: `status` is what the portal shows
+ * and `handed_off_at` is when it happened, and a row that carries either is a
+ * row the assistant must not answer for. Treating only one as authoritative
+ * would make an assistant that resumes talking because a status was reset
+ * while a salesperson was still mid-thread.
+ */
+async function isHandedOff(db: TenantDb, conversationId: string): Promise<boolean> {
+  const rows = await db
+    .select({ status: conversations.status, handedOffAt: conversations.handedOffAt })
+    .from(conversations)
+    .where(and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, conversationId)))
+    .limit(1);
+
+  const row = rows[0];
+  return Boolean(row && (row.status === 'handed_off' || row.handedOffAt));
 }
 
 async function writeMessages(
