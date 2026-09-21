@@ -37,6 +37,36 @@ async function newConversation(): Promise<string> {
   return session.conversationId;
 }
 
+/**
+ * The next slot the dealership could actually take a booking for.
+ *
+ * These cases each need *a* slot; which one is immaterial. They used to name a
+ * single 24-hour window near the far edge of the booking horizon, which
+ * quietly assumed the dealership is open that day. It is closed on Sundays, so
+ * roughly one run in seven asked for a window with no open hours in it and
+ * failed on the calendar rather than on a defect.
+ *
+ * Widening the window was not enough either: nothing beyond
+ * `maxHorizonDays` (14) is bookable at all, so a week starting at +13 days is
+ * a week of nothing. Searching the whole horizon is what makes this a question
+ * about availability rather than about today's date.
+ *
+ * Successive calls return different slots without being asked to: a booked
+ * slot stops being available, which is the property under test elsewhere.
+ */
+async function nextFreeSlot(): Promise<Date> {
+  const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
+    getAvailableTestDriveSlots(db, TENANT, {
+      from: new Date(),
+      to: new Date(Date.now() + 14 * 864e5),
+    }),
+  );
+
+  const slot = slots[0];
+  if (!slot) throw new Error('No test-drive slot available anywhere in the booking horizon');
+  return slot.startsAt;
+}
+
 function ask(conversationId: string, userMessage: string, client: ScriptedModel) {
   return respondToMessage({
     tenantId: SINCLAIR_TENANT_ID,
@@ -99,17 +129,12 @@ describe('answering a question', () => {
 describe('limits', () => {
   it('allows only one write per customer message', async () => {
     const conversationId = await newConversation();
-    const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
-      getAvailableTestDriveSlots(db, TENANT, {
-        from: new Date(Date.now() + 10 * 864e5),
-        to: new Date(Date.now() + 11 * 864e5),
-      }),
-    );
+    const startsAt = await nextFreeSlot();
 
     const booking = (email: string) => ({
       name: 'createTestDrive',
       input: {
-        startsAt: slots[0]!.startsAt.toISOString(),
+        startsAt: startsAt.toISOString(),
         fullName: 'Double Booker', email, contactConsent: true,
       },
     });
@@ -147,16 +172,11 @@ describe('limits', () => {
 describe('idempotency', () => {
   it('returns the first booking when the same call is retried', async () => {
     const conversationId = await newConversation();
-    const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
-      getAvailableTestDriveSlots(db, TENANT, {
-        from: new Date(Date.now() + 12 * 864e5),
-        to: new Date(Date.now() + 13 * 864e5),
-      }),
-    );
+    const startsAt = await nextFreeSlot();
     const call = {
       name: 'createTestDrive',
       input: {
-        startsAt: slots[0]!.startsAt.toISOString(),
+        startsAt: startsAt.toISOString(),
         fullName: 'Retry Customer',
         email: 'retry@example.test',
         contactConsent: true,
@@ -284,18 +304,13 @@ describe('extraction and scoring', () => {
 
   it('discards output that does not validate rather than coercing it', async () => {
     const conversationId = await newConversation();
-    const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
-      getAvailableTestDriveSlots(db, TENANT, {
-        from: new Date(Date.now() + 13 * 864e5),
-        to: new Date(Date.now() + 14 * 864e5),
-      }),
-    );
+    const startsAt = await nextFreeSlot();
     await ask(conversationId, 'Book it', new ScriptedModel([
       {
         toolUses: [{
           name: 'createTestDrive',
           input: {
-            startsAt: slots[0]!.startsAt.toISOString(),
+            startsAt: startsAt.toISOString(),
             fullName: 'Schema Test', email: 'schema@example.test', contactConsent: true,
           },
         }],

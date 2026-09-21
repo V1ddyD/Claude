@@ -2,7 +2,7 @@ import { NextResponse, after, type NextRequest } from 'next/server';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { receiveChannelMessage } from '@/server/channels/inbound';
 import { runWorker } from '@/server/jobs';
-import { env, features } from '@/server/config/env';
+import { env, features, messagingSecrets } from '@/server/config/env';
 
 /**
  * Instagram and Messenger direct messages.
@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
   // anonymous stranger able to put words in a customer's mouth, start a
   // conversation under a dealership's name, and be answered by its assistant.
   const raw = await request.text();
-  if (!verifySignature(raw, request.headers.get('x-hub-signature-256'), env.META_APP_SECRET!)) {
+  if (!verifySignature(raw, request.headers.get('x-hub-signature-256'), messagingSecrets())) {
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
   }
 
@@ -167,16 +167,26 @@ function extractMessages(payload: MetaWebhookPayload): ExtractedMessage[] {
 }
 
 /**
- * Meta signs the raw body with the app secret, as `sha256=<hex>`.
+ * Meta signs the raw body with an app secret, as `sha256=<hex>`.
  *
  * Verified against the bytes we received, not against a re-serialisation of
  * the parsed object: JSON.stringify would reorder keys and change whitespace,
  * and the signature would never match.
+ *
+ * Checked against EVERY configured secret because Meta issues two — a Facebook
+ * app secret and an Instagram one — and which signs a given delivery depends
+ * on how the account was connected. Every candidate is compared even after a
+ * match, so the work does not depend on which secret was the right one.
  */
-function verifySignature(body: string, header: string | null, secret: string): boolean {
+function verifySignature(body: string, header: string | null, secrets: string[]): boolean {
   if (!header?.startsWith('sha256=')) return false;
-  const expected = createHmac('sha256', secret).update(body).digest('hex');
-  return equals(header.slice('sha256='.length), expected);
+  if (secrets.length === 0) return false;
+
+  const supplied = header.slice('sha256='.length);
+  return secrets.reduce((matched, secret) => {
+    const expected = createHmac('sha256', secret).update(body).digest('hex');
+    return equals(supplied, expected) || matched;
+  }, false);
 }
 
 function equals(a: string, b: string): boolean {

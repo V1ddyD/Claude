@@ -71,6 +71,20 @@ const schema = z.object({
    * authenticated by an HMAC signature over the body instead.
    */
   META_APP_SECRET: z.string().optional(),
+  /**
+   * The Instagram app's own secret.
+   *
+   * Meta issues two. An app created from the Instagram use case has a separate
+   * "Instagram app ID" and "Instagram app secret" alongside the Facebook ones,
+   * and which of them signs a delivery depends on the route the account was
+   * connected through — a distinction visible nowhere on the webhook form, and
+   * whose only symptom is every delivery failing its signature check.
+   *
+   * So both are accepted. Holding two secrets that verify the same thing is
+   * not a weakening: each is the same kind of proof, and a forgery still needs
+   * one of them.
+   */
+  META_INSTAGRAM_APP_SECRET: z.string().optional(),
   META_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
 
   SESSION_SECRET: z.string().min(32).optional(),
@@ -245,7 +259,7 @@ export const features = {
    * able to put words in a customer's mouth and read the reply.
    */
   get messagingWebhooks() {
-    return Boolean(env.META_APP_SECRET);
+    return messagingSecrets().length > 0;
   },
   /**
    * The password-gated staff picker is available.
@@ -262,3 +276,17 @@ export const features = {
     );
   },
 };
+
+/**
+ * Every secret a Meta delivery might be signed with.
+ *
+ * Both are the same kind of proof, and which one arrives depends on how the
+ * account was connected — a fact the webhook form never states. Checking
+ * against each is what stops that being an afternoon of "invalid signature"
+ * with nothing to distinguish a misconfiguration from an attack.
+ */
+export function messagingSecrets(): string[] {
+  return [env.META_APP_SECRET, env.META_INSTAGRAM_APP_SECRET].filter(
+    (secret): secret is string => Boolean(secret),
+  );
+}

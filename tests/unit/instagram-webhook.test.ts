@@ -219,3 +219,45 @@ describe('an inbound delivery', () => {
     expect((await POST(post(body, sign(body)))).status).toBe(503);
   });
 });
+
+describe('Meta issuing two app secrets', () => {
+  const INSTAGRAM_SECRET = 'instagram-app-secret-for-tests';
+
+  it('accepts a body signed with the Instagram app secret', async () => {
+    // An app created from the Instagram use case has its own app id and
+    // secret beside the Facebook ones, and which signs a delivery depends on
+    // how the account was connected — a distinction the webhook form never
+    // mentions, whose only symptom is every delivery failing.
+    const { POST } = await loadRoute({ META_INSTAGRAM_APP_SECRET: INSTAGRAM_SECRET });
+    const body = message();
+
+    const response = await POST(post(body, sign(body, INSTAGRAM_SECRET)));
+
+    expect(response.status).toBe(200);
+  });
+
+  it('still accepts the Facebook app secret', async () => {
+    const { POST } = await loadRoute({ META_INSTAGRAM_APP_SECRET: INSTAGRAM_SECRET });
+    const body = message();
+
+    expect((await POST(post(body, sign(body)))).status).toBe(200);
+  });
+
+  it('accepts neither when the signature matches no configured secret', async () => {
+    // Holding two secrets is not a weakening: a forgery still needs one.
+    const { POST } = await loadRoute({ META_INSTAGRAM_APP_SECRET: INSTAGRAM_SECRET });
+    const body = message();
+
+    expect((await POST(post(body, sign(body, 'a-third-secret')))).status).toBe(401);
+  });
+
+  it('works when only the Instagram secret is configured', async () => {
+    const { POST } = await loadRoute({
+      META_APP_SECRET: undefined,
+      META_INSTAGRAM_APP_SECRET: INSTAGRAM_SECRET,
+    });
+    const body = message();
+
+    expect((await POST(post(body, sign(body, INSTAGRAM_SECRET)))).status).toBe(200);
+  });
+});
