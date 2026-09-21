@@ -30,13 +30,31 @@ export interface ChannelProvider {
 }
 
 /** Pinned rather than floating: a version bump is a decision, not a surprise. */
-const GRAPH_VERSION = 'v21.0';
+const GRAPH_VERSION = 'v26.0';
 
 /**
- * Instagram and Messenger both send through the Messenger Platform's Send API,
- * addressed to the business account's own id. WhatsApp uses a different shape
- * and is deliberately not implemented here — claiming support for a channel we
- * have not tested is worse than not offering it.
+ * Where a reply is posted, by channel.
+ *
+ * Not cosmetic. An account connected through Instagram Login holds an
+ * Instagram user token, and `graph.facebook.com` cannot read one — it answers
+ * "Cannot parse access token", which reads like an expired credential and is
+ * really a wrong doorway. Messenger keeps the Facebook host, because a Page
+ * token genuinely is a Facebook token.
+ *
+ * Learned the hard way: everything else worked — the message arrived, the
+ * assistant answered it — and the reply failed on the last call out.
+ */
+const SEND_HOST: Record<MessagingChannel, string> = {
+  instagram: 'https://graph.instagram.com',
+  messenger: 'https://graph.facebook.com',
+  whatsapp: 'https://graph.facebook.com',
+};
+
+/**
+ * Instagram and Messenger use the same Send API shape, addressed to the
+ * business account's own id, and differ only in host. WhatsApp uses a
+ * different shape and is deliberately not implemented — claiming support for a
+ * channel we have not tested is worse than not offering it.
  */
 class MetaChannelProvider implements ChannelProvider {
   readonly name = 'meta';
@@ -52,7 +70,7 @@ class MetaChannelProvider implements ChannelProvider {
 
     try {
       const response = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${message.senderExternalId}/messages`,
+        `${SEND_HOST[message.channel]}/${GRAPH_VERSION}/${message.senderExternalId}/messages`,
         {
           method: 'POST',
           headers: {

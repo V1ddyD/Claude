@@ -261,3 +261,22 @@ describe('Meta issuing two app secrets', () => {
     expect((await POST(post(body, sign(body, INSTAGRAM_SECRET)))).status).toBe(200);
   });
 });
+
+describe('where a reply is posted', () => {
+  it('sends Instagram through the Instagram host, not the Facebook one', () => {
+    // An account connected through Instagram Login holds an Instagram user
+    // token, and graph.facebook.com cannot read one — it answers "Cannot parse
+    // access token", which reads like an expired credential and is really a
+    // wrong doorway.
+    //
+    // Found in production with everything else working: the DM arrived, the
+    // assistant answered it, and only the call out failed.
+    const provider = readFileSync('src/server/channels/provider.ts', 'utf8');
+
+    expect(provider).toMatch(/instagram:\s*'https:\/\/graph\.instagram\.com'/);
+    // Messenger keeps the Facebook host: a Page token genuinely is one.
+    expect(provider).toMatch(/messenger:\s*'https:\/\/graph\.facebook\.com'/);
+    // And the host is chosen per channel rather than hardcoded into the call.
+    expect(provider).toMatch(/SEND_HOST\[message\.channel\]/);
+  });
+});
