@@ -4,6 +4,7 @@ import {
   colourWords,
   type Intent, type Timeframe, type TradeInVehicle, type Vocabulary,
 } from './understand';
+import { seedFrom } from './voice';
 
 /**
  * What the conversation has established, read back out of the messages.
@@ -111,6 +112,15 @@ export interface Memory {
   latest: ReturnType<typeof understand>;
   said: string[];
   asked: string;
+  /**
+   * Which phrasings this turn uses, as a number.
+   *
+   * Plain data, derived from the conversation, so it belongs here with
+   * everything else the conversation determines. Anything holding a Memory can
+   * build a Voice from it, and the same conversation always reads the same way
+   * — which is what keeps a varied assistant testable.
+   */
+  seed: number;
   modelSlug?: string;
   comparisonSlugs: string[];
   /**
@@ -168,6 +178,11 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
     latest,
     said: exchanges.map((e) => e.said),
     asked,
+    // Both halves matter. The turn number moves the wording on as the
+    // conversation goes, so two questions in a row do not come back in
+    // identical clothes; the message itself means two different customers
+    // asking the same thing are not read the same reply word for word.
+    seed: seedFrom(exchanges.length, exchanges.at(-1)?.said ?? ''),
     comparisonSlugs: [],
     words: [],
     colourWords: [],
@@ -183,7 +198,7 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
     if (FLOWS.includes(turn.intent)) flows.push(turn.intent);
 
     // Accepting the offer to pass a question on is what starts a ticket.
-    if (exchange.asked.includes(CANNOT_HELP) && turn.affirmative) flows.push('ticket');
+    if (saidCannotHelp(exchange.asked) && turn.affirmative) flows.push('ticket');
 
     // A reply to one of our own questions is an answer, not a new question. A
     // contact detail recorded as "the thing we could not answer" would put
@@ -272,45 +287,107 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
  * Both sides of this conversation are written here, so matching on the exact
  * phrasing is reliable in a way that matching on a model's output would not be.
  */
+/**
+ * Every wording of every question the assistant asks.
+ *
+ * These are memory keys as much as sentences. The next turn decides whether
+ * the customer answered a question or changed the subject by looking for the
+ * assistant's own words in its previous message — so a phrasing that is not
+ * listed here is a question whose answer will not be understood.
+ *
+ * Which is why variants live in ONE place. Adding a way to ask for a phone
+ * number without adding it here produces an assistant that asks, is answered,
+ * and asks again — the single most infuriating thing a bot does.
+ */
 export const ASKS = {
-  contact: 'Could I take your name and email address?',
-  consent: 'Are you happy for the team to contact you about this?',
-  phone: 'What number should the team call you on?',
-  time: 'Which of those times suits you?',
-  model: 'Which model did you have in mind?',
-  code: 'What is the confirmation code on your booking, and the email address it was made with?',
+  contact: [
+    'Could I take your name and email address?',
+    'What name and email should I put down?',
+    'Can I grab your name and email?',
+    'Who am I booking that for — name and email?',
+  ],
+  consent: [
+    'Are you happy for the team to contact you about this?',
+    "Is it all right if the team gets in touch about this?",
+    'Happy for someone to contact you about it?',
+  ],
+  phone: [
+    'What number should the team call you on?',
+    "What's the best number to reach you on?",
+    'Which number should they ring?',
+  ],
+  time: [
+    'Which of those times suits you?',
+    'Which one works for you?',
+    'Any of those any good?',
+    'Which would you like?',
+  ],
+  model: [
+    'Which model did you have in mind?',
+    'Which one were you looking at?',
+    'Which car did you mean?',
+  ],
+  code: [
+    "What's the confirmation code on your booking, and the email address it was made with?",
+    "Could you give me the confirmation code and the email it was booked with?",
+  ],
   /**
-   * The appraisal lead-in, kept as a constant of its own.
+   * The appraisal lead-in.
    *
-   * The vehicle question is phrased from what is still missing, so the wording
-   * varies. This fragment does not, which is what lets the next message be
-   * recognised as an answer to it rather than a change of subject.
+   * The vehicle question that follows is phrased from whatever is still
+   * missing, so its wording moves. This fragment is what makes the next
+   * message readable as an answer rather than a change of subject.
    */
-  appraisal: 'Happy to get that appraised.',
-  vehicle: 'What is the year, make, model and rough mileage of your current car?',
-  condition: 'How would you describe its condition — excellent, good, fair or poor?',
-  finance: 'Would you like a specialist to confirm the terms?',
-} as const;
+  appraisal: [
+    'Happy to get that appraised.',
+    'We can get that appraised.',
+    'I can get that looked at for you.',
+  ],
+  vehicle: [
+    "What's the year, make, model and rough mileage of your current car?",
+    "What are you driving at the moment — year, make, model and rough mileage?",
+    'Tell me the year, make, model and roughly the mileage?',
+  ],
+  condition: [
+    'How would you describe its condition — excellent, good, fair or poor?',
+    'What sort of condition is it in — excellent, good, fair or poor?',
+  ],
+  finance: [
+    'Would you like a specialist to confirm the terms?',
+    'Want someone to confirm the actual terms?',
+    'Shall I get a specialist to firm those numbers up?',
+  ],
+} as const satisfies Record<string, readonly string[]>;
 
 export type AskKind = keyof typeof ASKS;
 
 /**
  * Said when no tool can answer the question.
  *
- * A constant because the next turn has to recognise it: an honest "I do not
- * have that" is only useful if the offer that follows it can be accepted.
+ * Listed, like the asks, because the next turn has to recognise it: an honest
+ * "I do not have that" is only useful if the offer that follows can be
+ * accepted, and "yes please" means nothing without knowing what it answered.
  */
-export const CANNOT_HELP =
-  'I do not have that confirmed, and I will not guess at it.';
+export const CANNOT_HELP = [
+  "I don't have that confirmed, and I won't guess at it.",
+  "I don't have that one confirmed, and I'd rather not guess.",
+  "That's not something I've got confirmed, and guessing wouldn't help you.",
+  "I haven't got that confirmed, and I'm not going to guess at it.",
+] as const;
 
 export function askedFor(assistantText: string, kind: AskKind): boolean {
-  return assistantText.includes(ASKS[kind]);
+  return ASKS[kind].some((ask) => assistantText.includes(ask));
+}
+
+/** True when the assistant's last message admitted it could not answer. */
+export function saidCannotHelp(assistantText: string): boolean {
+  return CANNOT_HELP.some((line) => assistantText.includes(line));
 }
 
 /** True when the assistant's last message was waiting for an answer. */
 function isAsk(assistantText: string): boolean {
   return (
-    assistantText.includes(CANNOT_HELP) ||
-    Object.values(ASKS).some((ask) => assistantText.includes(ask))
+    saidCannotHelp(assistantText) ||
+    Object.values(ASKS).some((variants) => variants.some((ask) => assistantText.includes(ask)))
   );
 }

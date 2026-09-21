@@ -56,7 +56,7 @@ describe('a vehicle belonging to the other dealership', () => {
 
     expect(reply.toolsUsed).not.toContain('getVehicle');
     expect(reply.text).not.toMatch(/mid-size suv/i);
-    expect(reply.text).toMatch(/do not make/i);
+    expect(reply.text).toMatch(/don't (make|build)|no S5/i);
     // And it offers its own range instead.
     expect(reply.text).toContain('Northwind Harrier');
   });
@@ -105,7 +105,7 @@ describe('inventory belonging to the other dealership', () => {
       WHERE tenant_id = ${SINCLAIR_TENANT_ID} AND status = 'available'
     `;
     expect(sinclair!.count).toBeGreaterThan(0);
-    expect(reply.text).toMatch(/nothing matching/i);
+    expect(reply.text).toMatch(/nothing matching|none of those|nothing like that/i);
     expect(reply.text).not.toMatch(/SIN-\d/);
   });
 });

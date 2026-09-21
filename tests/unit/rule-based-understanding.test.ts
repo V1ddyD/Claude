@@ -177,11 +177,11 @@ describe('what it will act on', () => {
   it('never writes before consent, however much else it knows', () => {
     const decision = turn(
       { role: 'user', content: 'Please call me back' },
-      { role: 'assistant', content: ASKS.contact },
+      { role: 'assistant', content: ASKS.contact[0] },
       { role: 'user', content: 'Alex Mercer, alex@example.com, 416 555 0134' },
     );
     expect(decision.tools).toEqual([]);
-    expect(decision.text).toContain(ASKS.consent);
+    expect(decision.text).toContain(ASKS.consent[0]);
   });
 
   it('treats consent as a yes to being asked, never as a side effect of an email', () => {
@@ -191,7 +191,7 @@ describe('what it will act on', () => {
     expect(withoutAsk.consent).toBe(false);
 
     const withAsk = remember([
-      { asked: ASKS.consent, said: 'yes, that is fine' },
+      { asked: ASKS.consent[0], said: 'yes, that is fine' },
     ]);
     expect(withAsk.consent).toBe(true);
   });
@@ -199,7 +199,7 @@ describe('what it will act on', () => {
   it('asks which car before answering a question that needs one', () => {
     const decision = turn({ role: 'user', content: 'What colours are there?' });
     expect(decision.tools).toEqual([]);
-    expect(decision.text).toContain(ASKS.model);
+    expect(ASKS.model.some((ask) => decision.text.includes(ask))).toBe(true);
     // Offers only what this dealership's prompt said it sells.
     expect(decision.text).toContain('Sinclair S5');
   });
@@ -207,7 +207,9 @@ describe('what it will act on', () => {
   it('says outright that we do not make a car we do not make', () => {
     const decision = turn({ role: 'user', content: 'Tell me about the Sinclair Z9' });
     expect(decision.tools).toEqual([]);
-    expect(decision.text).toContain('We do not make a Z9');
+    // One of several wordings, all saying the same thing.
+    expect(decision.text).toContain('Z9');
+    expect(decision.text).toMatch(/don't make|don't build|no Z9/i);
     // And names what does exist, which is the useful half of the answer.
     expect(decision.text).toContain('Sinclair S5');
   });
@@ -220,10 +222,12 @@ describe('what it will act on', () => {
   it('does not deny making a car when the token is a deadline', () => {
     // "by Q3" is when they want it. Denying we build a Q3 would be absurd.
     const deadline = turn({ role: 'user', content: 'Can I get a car by Q3 next year?' });
-    expect(deadline.text).not.toMatch(/do not make/i);
+    expect(deadline.text).not.toMatch(/don't (make|build)|no Q4/i);
 
     // Whereas a rival's model, named on its own, is exactly what to deny.
-    expect(turn({ role: 'user', content: 'Do you sell the Q4?' }).text).toContain('do not make');
+    expect(turn({ role: 'user', content: 'Do you sell the Q4?' }).text).toMatch(
+      /don't (make|build)|no Q4/i,
+    );
   });
 
   it('leaves a real model alone when another token sits beside it', () => {
@@ -256,15 +260,15 @@ describe('what it will act on', () => {
       { role: 'assistant', content: `${ASKS.appraisal} What is the rough mileage of the 2019 BMW 3 Series?` },
       { role: 'user', content: 'About 95,000 km' },
     );
-    expect(decision.text).toContain(ASKS.condition);
+    expect(ASKS.condition.some((ask) => decision.text.includes(ask))).toBe(true);
   });
 
   it('carries a flow across a bare answer', () => {
     const decision = turn(
       { role: 'user', content: 'I want to trade in my old car' },
-      { role: 'assistant', content: ASKS.vehicle },
+      { role: 'assistant', content: ASKS.vehicle[0] },
       { role: 'user', content: '2019 Toyota Camry, 80,000 km' },
     );
-    expect(decision.text).toContain(ASKS.condition);
+    expect(ASKS.condition.some((ask) => decision.text.includes(ask))).toBe(true);
   });
 });

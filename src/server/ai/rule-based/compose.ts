@@ -1,4 +1,5 @@
 import type { Step } from './state';
+import { voiceFor, maybeNudge, OFFER_DRIVE, type Voice } from './voice';
 
 /**
  * Turning a tool result into something worth reading.
@@ -38,21 +39,22 @@ export function sentenceList(items: string[]): string {
   return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
 
-export function describe(step: Step): string {
+export function describe(step: Step, seed = 0): string {
   if (step.isError) return apologise(step);
   const result = obj(step.result);
+  const v = voiceFor(seed);
 
   switch (step.name) {
     case 'searchVehicles':
-      return describeSearch(result);
+      return describeSearch(result, v);
     case 'getVehicle':
-      return describeVehicle(result);
+      return describeVehicle(result, v);
     case 'getVehiclePowertrains':
-      return describePowertrains(result);
+      return describePowertrains(result, v);
     case 'getVehicleTrims':
-      return describeTrims(result);
+      return describeTrims(result, v);
     case 'getVehicleColours':
-      return describeColours(result);
+      return describeColours(result, v);
     case 'getVehicleOptions':
       return describeOptions(result);
     case 'getVehicleFeatures':
@@ -62,7 +64,7 @@ export function describe(step: Step): string {
     case 'compareVehicles':
       return describeComparison(step.result);
     case 'checkInventory':
-      return describeStock(result);
+      return describeStock(result, v);
     case 'calculateFinanceEstimate':
       return describeEstimate(result);
     case 'getDealershipInformation':
@@ -70,7 +72,7 @@ export function describe(step: Step): string {
     case 'getDealershipHours':
       return describeHours(result);
     case 'createTestDrive':
-      return describeBooking(result);
+      return describeBooking(result, v);
     case 'cancelTestDrive':
       return describeCancellation(result);
     case 'createCallbackRequest':
@@ -103,13 +105,17 @@ export function describe(step: Step): string {
  */
 function apologise(step: Step): string {
   const message = str(obj(step.result).message);
-  return message ?? 'I could not check that just now. The team can confirm it for you.';
+  return message ?? "I couldn't check that just now. The team can confirm it for you.";
 }
 
-function describeSearch(result: Json): string {
+function describeSearch(result: Json, v: Voice): string {
   const models = list(result.models);
   if (models.length === 0) {
-    return 'Nothing in the range matches that exactly. Tell me what matters most and I will find the closest thing we do build.';
+    return v.pick('search:none', [
+      "Nothing matches that exactly, I'm afraid. Tell me what matters most and I'll find the closest thing we build.",
+      'Nothing in the range fits that precisely. What matters most to you? I can find the nearest thing.',
+      "Nothing quite fits that. Tell me the one thing it has to do and I'll see what comes closest.",
+    ]);
   }
 
   const lines = models.map((model) => {
@@ -117,10 +123,19 @@ function describeSearch(result: Json): string {
     return `- **${str(model.name)}** — ${str(model.segment)}, from ${money(model.priceFrom)}${tagline ? `. ${tagline}` : ''}`;
   });
 
-  return `${models.length === 1 ? 'One car fits that' : `${models.length} fit that`}:\n\n${lines.join('\n')}`;
+  const lead =
+    models.length === 1
+      ? v.pick('search:one', ['One car fits that', 'Just the one fits that', 'One of ours fits that'])
+      : v.pick('search:many', [
+          `${models.length} fit that`,
+          `${models.length} of ours fit that`,
+          `That narrows it to ${models.length}`,
+        ]);
+
+  return `${lead}:\n\n${lines.join('\n')}`;
 }
 
-function describeVehicle(result: Json): string {
+function describeVehicle(result: Json, v: Voice): string {
   // getVehicle projects these as plain names, not objects.
   const powertrains = (result.powertrains as string[] | undefined) ?? [];
   const trims = (result.trims as string[] | undefined) ?? [];
@@ -131,14 +146,23 @@ function describeVehicle(result: Json): string {
     overview,
     powertrains.length ? `Powertrains: ${sentenceList(powertrains)}.` : '',
     trims.length ? `Trims: ${sentenceList(trims)}.` : '',
+    // Offered on some turns, not all. A reply that ends in the same invitation
+    // every single time is a reply nobody reads the end of.
+    maybeNudge(v, 'vehicle:drive', OFFER_DRIVE),
   ];
 
   return parts.filter(Boolean).join('\n\n');
 }
 
-function describePowertrains(result: Json): string {
+function describePowertrains(result: Json, v: Voice): string {
   const powertrains = list(result.powertrains);
-  if (powertrains.length === 0) return 'I do not have powertrain detail for that one.';
+  if (powertrains.length === 0) {
+    return v.pick('pt:none', [
+      "I don't have the engine detail for that one.",
+      "I haven't got powertrain detail for that car.",
+      "That one I don't have engine detail for.",
+    ]);
+  }
 
   const lines = powertrains.map((pt) => {
     const facts = [
@@ -152,15 +176,25 @@ function describePowertrains(result: Json): string {
   return `${lines.join('\n')}`;
 }
 
-function describeTrims(result: Json): string {
+function describeTrims(result: Json, v: Voice): string {
   const trims = list(result.trims);
-  if (trims.length === 0) return 'I do not have trim detail for that one.';
+  if (trims.length === 0) {
+    return v.pick('trim:none', [
+      "I don't have the trim detail for that one.",
+      "I haven't got the trim levels for that car.",
+    ]);
+  }
   return trims.map((t) => `- **${str(t.name)}** — from ${money(t.priceFrom)}`).join('\n');
 }
 
-function describeColours(result: Json): string {
+function describeColours(result: Json, v: Voice): string {
   const colours = list(result.colours);
-  if (colours.length === 0) return 'I do not have the colour list for that one.';
+  if (colours.length === 0) {
+    return v.pick('col:none', [
+      "I don't have the colour list for that one.",
+      "I haven't got the paint options for that car.",
+    ]);
+  }
 
   const line = (c: Json) => {
     const surcharge = money(c.surcharge);
@@ -176,7 +210,11 @@ function describeColours(result: Json): string {
   return [
     exterior.length ? `Paint:\n${exterior.join('\n')}` : '',
     interior.length ? `Interior:\n${interior.join('\n')}` : '',
-    'Anything without a figure beside it is included.',
+    v.pick('col:note', [
+      'Anything without a figure beside it is included.',
+      'Anything with no price next to it comes as standard.',
+      "Where there's no figure, it's included.",
+    ]),
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -244,10 +282,14 @@ function describeComparison(result: unknown): string {
   return `${lines.join('\n')}\n\nTell me which matters most — space, pace or running cost — and I will narrow it down.`;
 }
 
-function describeStock(result: Json): string {
+function describeStock(result: Json, v: Voice): string {
   const available = list(result.available);
   if (available.length === 0) {
-    return 'Nothing matching that is on the ground right now. The team can tell you what is inbound and when.';
+    return v.pick('stock:none', [
+      "Nothing matching that is on the ground right now. The team can tell you what's inbound and when.",
+      "None of those here at the moment, sorry. The team will know what's on its way.",
+      'Nothing like that in stock today. Someone here can tell you what is coming and roughly when.',
+    ]);
   }
 
   const lines = available.map((unit) => {
@@ -262,7 +304,22 @@ function describeStock(result: Json): string {
     ].join('');
   });
 
-  return `${available.length === 1 ? 'One is here now' : `${available.length} are here now`}:\n\n${lines.join('\n')}\n\nStock moves, so that is as of today.`;
+  const lead =
+    available.length === 1
+      ? v.pick('stock:one', ['One is here now', 'There is one here now', 'We have one on the floor'])
+      : v.pick('stock:many', [
+          `${available.length} are here now`,
+          `We have ${available.length} here now`,
+          `${available.length} on the floor today`,
+        ]);
+
+  const caveat = v.pick('stock:caveat', [
+    'Stock moves, so that is as of today.',
+    "That's today — stock does shift.",
+    'Worth checking again if you leave it a few days; these move.',
+  ]);
+
+  return `${lead}:\n\n${lines.join('\n')}\n\n${caveat}`;
 }
 
 function describeEstimate(result: Json): string {
@@ -310,20 +367,29 @@ function describeHours(result: Json): string {
     .join('\n\n');
 }
 
-function describeBooking(result: Json): string {
+function describeBooking(result: Json, v: Voice): string {
   const email = str(result.confirmationEmail) ?? '';
   return [
-    `Booked — **${str(result.when)}**${str(result.vehicle) ? ` in the ${str(result.vehicle)}` : ''}.`,
+    `${v.pick('book:lead', ['Booked', "That's booked", 'All booked'])} — **${str(result.when)}**` +
+      `${str(result.vehicle) ? ` in the ${str(result.vehicle)}` : ''}.`,
     `Your confirmation code is **${str(result.confirmationCode)}** and the reference is ${str(result.ticketNumber)}.`,
     // Queued is not delivered, and the wording travels with the fact.
     email.startsWith('queued')
-      ? 'A confirmation email is on its way.'
-      : 'I could not queue a confirmation email, so keep that code somewhere safe.',
+      ? v.pick('book:email', [
+          'A confirmation email is on its way.',
+          'A confirmation is on its way to you by email.',
+        ])
+      : "I couldn't queue a confirmation email, so keep that code somewhere safe.",
+    v.pick('book:close', [
+      'See you then.',
+      'Looking forward to it.',
+      "We'll see you then.",
+    ]),
   ].join(' ');
 }
 
 function describeCancellation(result: Json): string {
-  return `Cancelled — that was ${str(result.was)}. The slot is free again, so say the word if you would like another time.`;
+  return `Cancelled — that was ${str(result.was)}. The slot is free again, so say the word if you'd like another time.`;
 }
 
 function describeRequest(result: Json, next: string): string {

@@ -7,6 +7,7 @@ import { withTenant } from '../../src/server/db/tenant-db';
 import { respondToMessage } from '../../src/server/ai/conversation';
 import { ensureConversation } from '../../src/server/ai/extraction';
 import { RuleBasedModel } from '../../src/server/ai/rule-based';
+import { askedFor, saidCannotHelp } from '../../src/server/ai/rule-based/state';
 import { leads as leadsTable, customers } from '../../src/server/db/schema';
 import { and, eq } from 'drizzle-orm';
 
@@ -83,7 +84,11 @@ describe('the rule-based assistant', () => {
     const nonsense = await chat.say('Do you sell the Z9?');
     // Says plainly that it does not exist and names what does — and attaches
     // no figure to anything, because no tool priced it.
-    expect(nonsense.text).toMatch(/do not make a Z9/i);
+    // Asserted on meaning, not on one phrasing: the assistant says this more
+    // than one way, and pinning the sentence would make adding a wording a
+    // test failure rather than an improvement.
+    expect(nonsense.text).toContain('Z9');
+    expect(nonsense.text).toMatch(/don't (make|build)|no Z9/i);
     expect(nonsense.text).toContain('Sinclair E5');
     expect(nonsense.text).not.toMatch(/\$\d/);
   });
@@ -106,7 +111,7 @@ describe('the rule-based assistant', () => {
     const identified = await chat.say('Alex Mercer, alex.mercer@example.com');
     expect(identified.toolsUsed).not.toContain('createTestDrive');
     // An email address is an identifier, not a permission.
-    expect(identified.text).toMatch(/happy for the team to contact you/i);
+    expect(askedFor(identified.text, 'consent')).toBe(true);
 
     const booked = await chat.say('Yes, that is fine');
     expect(booked.toolsUsed).toContain('createTestDrive');
@@ -154,8 +159,8 @@ describe('the rule-based assistant', () => {
 
     const asked = await chat.say('Does the S5 tow a three horse trailer in winter?');
     expect(asked.toolsUsed).toEqual([]);
-    expect(asked.text).toMatch(/will not guess/i);
-    expect(asked.text).toMatch(/pass it on/i);
+    expect(saidCannotHelp(asked.text)).toBe(true);
+    expect(asked.text).toMatch(/pass it on|pass it along|hand it over/i);
 
     await chat.say('Yes please');
     await chat.say('Dana Okafor, dana@example.com');
@@ -263,7 +268,7 @@ describe('the rule-based assistant', () => {
 
     await chat.say('Could you call me about the X7?');
     const needsNumber = await chat.say('Jo Lindqvist, jo@example.com');
-    expect(needsNumber.text).toMatch(/what number/i);
+    expect(askedFor(needsNumber.text, 'phone')).toBe(true);
     expect(needsNumber.toolsUsed).not.toContain('createCallbackRequest');
 
     await chat.say('416 555 0134');

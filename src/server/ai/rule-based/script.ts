@@ -1,7 +1,11 @@
 import {
   ASKS, CANNOT_HELP, remember,
-  type ConversationState, type Memory, type Step,
+  type AskKind, type ConversationState, type Memory, type Step,
 } from './state';
+import {
+  voiceFor, sentences,
+  ANYTHING_ELSE, GOT_IT, OFFER_TEAM, ON_IT,
+} from './voice';
 import { saidMatchesSlot } from './understand';
 import {
   resolveTrim, resolvePowertrain, resolveColour,
@@ -38,6 +42,17 @@ const say = (text: string): Decision => ({ text, tools: [] });
 const call = (...tools: ToolCall[]): Decision => ({ text: '', tools });
 const t = (name: string, input: Record<string, unknown>): ToolCall => ({ name, input });
 
+/**
+ * One wording of one of the assistant's questions.
+ *
+ * Always through here, never by reaching into ASKS: the variants and the
+ * recognition that reads them back live together, and a question asked in
+ * words the next turn cannot recognise is a question that gets asked twice.
+ */
+function ask(m: Memory, kind: AskKind): string {
+  return voiceFor(m.seed).pick(`ask:${kind}`, ASKS[kind]);
+}
+
 export function decide(system: string, state: ConversationState, now: Date): Decision {
   const digest = readDigest(system);
   // The vocabulary is this tenant's own range, read from the catalogue digest
@@ -59,24 +74,42 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
   // explicit about this (§"What you may state as fact"), and it is a far better
   // answer than "I do not have that confirmed" — which is true, but leaves the
   // customer wondering whether the Z9 exists and we are simply unsure.
+  const v = voiceFor(m.seed);
+
   const invented = inventedModel(m, digest);
   if (invented) {
     return say(
-      `We do not make ${article(invented)} ${invented}. ` +
-        `Here is the full ${digest.brandName} range:\n\n${range(digest)}`,
+      `${v.pick('invented', [
+        `We don't make ${article(invented)} ${invented}, I'm afraid.`,
+        `There's no ${invented} in our range, sorry.`,
+        `We don't build ${article(invented)} ${invented}.`,
+      ])} ` +
+        `Here is everything ${digest.brandName} does make:\n\n${range(digest)}`,
     );
   }
 
   switch (m.intent) {
     case 'greeting':
       return say(
-        `Welcome to ${digest.brandName}. I can talk you through the range, work out prices ` +
-          'and finance estimates, check what is on the ground, and book you a test drive. ' +
-          'Where would you like to start?',
+        v.pick('greeting', [
+          `Hello, and welcome to ${digest.brandName}. I can talk you through the range, ` +
+            "work out prices and finance, tell you what's on the ground today, or get " +
+            'you booked in for a drive. What would be most useful?',
+          `Hi there. I'm here to help with anything ${digest.brandName} — what we build, ` +
+            "what it costs, what's in stock, or booking you a test drive. Where shall we start?",
+          `Welcome to ${digest.brandName}. Ask me about any of the cars, prices, finance, ` +
+            'or what we have here right now — and I can book you a drive whenever you like. ' +
+            'What are you after?',
+        ]),
       );
 
     case 'thanks':
-      return say('Any time. Anything else you would like to know?');
+      return say(
+        sentences(
+          v.pick('thanks', ['Any time.', "You're very welcome.", 'My pleasure.', 'No trouble at all.']),
+          v.pick('thanks:more', ANYTHING_ELSE),
+        ),
+      );
 
     case 'hours':
       return call(t('getDealershipHours', {}));
@@ -90,7 +123,7 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
     case 'compare':
       return m.comparisonSlugs.length >= 2
         ? call(t('compareVehicles', { modelSlugs: m.comparisonSlugs.slice(0, 3) }))
-        : say(`Happy to. Which two should I put side by side?\n\n${range(digest)}`);
+        : say(`${v.pick('compare', ['Happy to. Which two should I put side by side?', 'Sure — which two shall I compare?', "Of course. Which pair did you want to look at?"])}\n\n${range(digest)}`);
 
     case 'vehicle_overview':
     case 'price':
@@ -125,7 +158,7 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
       return serviceTurn(m);
 
     default:
-      return say(cannotHelp());
+      return say(cannotHelp(m));
   }
 }
 
@@ -146,7 +179,7 @@ function catalogueTurn(m: Memory, digest: Digest): Decision {
   }
 
   const slug = m.modelSlug;
-  if (!slug) return say(`${ASKS.model}\n\n${range(digest)}`);
+  if (!slug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
 
   switch (m.intent) {
     case 'powertrains':
@@ -226,7 +259,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
   // A failed tool ends the turn. Carrying on would mean pricing a build from a
   // list that never arrived.
   const failed = steps.find((step) => step.isError);
-  if (failed) return say(describe(failed));
+  if (failed) return say(describe(failed, m.seed));
 
   const done = new Set(steps.map((step) => step.name));
 
@@ -263,7 +296,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
     if (m.colourWords.length > 0 && !colour) {
       return say(
         `We do not offer ${aColour(m.colourWords[0]!)} on that one. ` +
-          `${describe(steps.find((step) => step.name === 'getVehicleColours')!)}`,
+          `${describe(steps.find((step) => step.name === 'getVehicleColours')!, m.seed)}`,
       );
     }
 
@@ -321,7 +354,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
         return say(
           [
             from ? `The ${name} starts at ${from}.` : '',
-            describe(steps.find((step) => step.name === 'getVehicleTrims')!),
+            describe(steps.find((step) => step.name === 'getVehicleTrims')!, m.seed),
             'Tell me which trim and engine you are interested in and I will price it exactly.',
           ]
             .filter(Boolean)
@@ -370,14 +403,14 @@ const ANSWERS = new Set([
 
 function compose(m: Memory, steps: Step[]): Decision['text'] {
   const last = steps.at(-1);
-  if (!last) return cannotHelp();
+  if (!last) return cannotHelp(m);
 
   const body = ANSWERS.has(last.name)
-    ? describe(last)
+    ? describe(last, m.seed)
     : steps.map(describe).filter(Boolean).join('\n\n');
 
   const follow = followUp(m, last);
-  return [preamble(m, last), body || cannotHelp(), follow].filter(Boolean).join('\n\n');
+  return [preamble(m, last), body || cannotHelp(m), follow].filter(Boolean).join('\n\n');
 }
 
 function foundNothing(step: Step): boolean {
@@ -412,7 +445,7 @@ function aColour(word: string): string {
 
 /** One next step, offered only where there is an obvious one. */
 function followUp(m: Memory, last: Step): string {
-  if (last.name === 'calculateFinanceEstimate') return ASKS.finance;
+  if (last.name === 'calculateFinanceEstimate') return ask(m, 'finance');
   if (last.name === 'checkInventory' && !last.isError) {
     return 'Say the word if you would like to drive one and I will check the diary.';
   }
@@ -457,7 +490,7 @@ function bookingTurn(m: Memory, steps: Step[]): Decision {
   const chosen = narrowed.length === 1 ? narrowed[0]! : undefined;
 
   if (!chosen) {
-    return say(`${offer(narrowed.length > 0 ? narrowed : slots)}\n\n${ASKS.time}`);
+    return say(`${offer(narrowed.length > 0 ? narrowed : slots)}\n\n${ask(m, 'time')}`);
   }
 
   const missing = askContact(m, `${chosen.label} works.`);
@@ -520,8 +553,8 @@ function narrowSlots(slots: Slot[], m: Memory): Slot[] {
  * anything (spec §19, docs/08-security-review.md).
  */
 function askContact(m: Memory, lead: string): Decision | undefined {
-  if (!m.name || !m.email) return say(`${lead} ${ASKS.contact}`);
-  if (!m.consent) return say(`Thanks, ${firstName(m.name)}. ${ASKS.consent}`);
+  if (!m.name || !m.email) return say(`${lead} ${ask(m, 'contact')}`);
+  if (!m.consent) return say(`${voiceFor(m.seed).pick('consent:lead', GOT_IT).replace(/\.$/, '')}, ${firstName(m.name)}. ${ask(m, 'consent')}`);
   return undefined;
 }
 
@@ -539,16 +572,16 @@ function firstName(name: string): string {
 }
 
 function cancelTurn(m: Memory): Decision {
-  if (!m.confirmationCode || !m.email) return say(`I can sort that out. ${ASKS.code}`);
+  if (!m.confirmationCode || !m.email) return say(`${voiceFor(m.seed).pick('cancel', ['I can sort that out.', 'Of course, no problem.', 'Easily done.'])} ${ask(m, 'code')}`);
   return call(
     t('cancelTestDrive', { confirmationCode: m.confirmationCode, email: m.email }),
   );
 }
 
 function callbackTurn(m: Memory): Decision {
-  if (!m.name || !m.email) return say(`Of course. ${ASKS.contact}`);
-  if (!m.phone) return say(ASKS.phone);
-  if (!m.consent) return say(`Thanks, ${firstName(m.name)}. ${ASKS.consent}`);
+  if (!m.name || !m.email) return say(`${voiceFor(m.seed).pick('callback', ON_IT)} ${ask(m, 'contact')}`);
+  if (!m.phone) return say(ask(m, 'phone'));
+  if (!m.consent) return say(`${voiceFor(m.seed).pick('consent:lead', GOT_IT).replace(/\.$/, '')}, ${firstName(m.name)}. ${ask(m, 'consent')}`);
 
   return call(
     t('createCallbackRequest', {
@@ -574,11 +607,11 @@ function tradeInTurn(m: Memory): Decision {
     const known = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
     return say(
       known
-        ? `${ASKS.appraisal} What is ${sentenceList(missingDetails)} of the ${known}?`
-        : `${ASKS.appraisal} ${ASKS.vehicle}`,
+        ? `${ask(m, 'appraisal')} What is ${sentenceList(missingDetails)} of the ${known}?`
+        : `${ask(m, 'appraisal')} ${ask(m, 'vehicle')}`,
     );
   }
-  if (!vehicle.condition) return say(ASKS.condition);
+  if (!vehicle.condition) return say(ask(m, 'condition'));
 
   const missing = askContact(m, 'Thank you.');
   if (missing) return missing;
@@ -653,7 +686,7 @@ function ticketTurn(m: Memory): Decision {
 function financeRequestTurn(m: Memory, digest: Digest): Decision {
   const missing = askContact(m, 'I can get a specialist to confirm the terms.');
   if (missing) return missing;
-  if (!m.modelSlug) return say(`${ASKS.model}\n\n${range(digest)}`);
+  if (!m.modelSlug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
 
   // The price is re-read rather than remembered: the request must record what
   // the catalogue says today, not what was quoted three turns ago.
@@ -674,11 +707,20 @@ function reasonFrom(m: Memory, fallback: string): string {
 /* Fallbacks                                                                   */
 /* -------------------------------------------------------------------------- */
 
-function cannotHelp(): string {
-  return (
-    `${CANNOT_HELP} I can talk you through the range, prices, what is on the ground, ` +
-    'a finance estimate, or book you a test drive. If it is something else, the team ' +
-    'can answer it — would you like me to pass it on?'
+function cannotHelp(m: Memory): string {
+  const v = voiceFor(m.seed);
+  return sentences(
+    v.pick('cannot:lead', CANNOT_HELP),
+    v.pick('cannot:can', [
+      "I can talk you through the range, prices, what's on the ground, a finance estimate, or book you a drive.",
+      "What I'm good for: the cars themselves, prices and finance, what's in stock, and booking a test drive.",
+      "I can help with the range, what things cost, what we've got here, and getting you booked in for a drive.",
+    ]),
+    `If it's something else, ${v.pick('cannot:team', OFFER_TEAM)} — ${v.pick('cannot:offer', [
+      'shall I pass it on?',
+      'would you like me to pass it along?',
+      'want me to hand it over?',
+    ])}`,
   );
 }
 

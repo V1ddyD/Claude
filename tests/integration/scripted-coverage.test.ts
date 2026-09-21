@@ -139,9 +139,9 @@ describe('every model in the catalogue', () => {
       // Either it reports cars, or it says there are none. Never the reverse
       // of what the inventory system holds.
       if (row!.count === 0) {
-        expect.soft(reply.text, model.slug).toMatch(/nothing matching|none/i);
+        expect.soft(reply.text, model.slug).toMatch(/nothing matching|none of those|nothing like that|none/i);
       } else {
-        expect.soft(reply.text, model.slug).toMatch(/here now/i);
+        expect.soft(reply.text, model.slug).toMatch(/here now|on the floor|we have one/i);
       }
     }
   });

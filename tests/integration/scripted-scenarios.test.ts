@@ -130,7 +130,7 @@ describe('a test drive that cannot happen', () => {
 
     expect(reply.toolsUsed).not.toContain('createTestDrive');
     expect(reply.receipt).toBeUndefined();
-    expect(reply.text).toMatch(/which of those times|suits you/i);
+    expect(reply.text).toMatch(/which of those times|suits you|works for you|any good|which would you like/i);
   });
 
   it('never confirms a booking the database did not commit', async () => {
