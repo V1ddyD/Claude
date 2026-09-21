@@ -115,6 +115,69 @@ export async function listChannelAccounts(tenantId: string): Promise<ConnectedAc
   });
 }
 
+export interface ChannelActivity {
+  /** Inbound platform messages we have accepted, newest first. */
+  inbound: Array<{ channel: string; externalMessageId: string; receivedAt: Date }>;
+  /** Conversations that arrived from a messaging channel, newest first. */
+  conversations: Array<{
+    id: string;
+    channel: string;
+    lastMessageAt: Date;
+    messages: number;
+  }>;
+  /** Replies we have queued or sent, newest first. */
+  outbound: Array<{
+    status: string;
+    body: string;
+    lastError: string | null;
+    createdAt: Date;
+  }>;
+}
+
+/**
+ * What has actually happened on a channel.
+ *
+ * Diagnosis, not a feature. When a DM produces no reply there are three very
+ * different failures wearing the same face — the platform never delivered it,
+ * it was delivered and not understood, or it was answered and the answer never
+ * went out — and no amount of reasoning from the outside separates them.
+ *
+ * Each list answers one of those, in order. Empty inbound means the message
+ * never arrived, and nothing downstream is worth looking at.
+ */
+export async function channelActivity(tenantId: string, limit = 10): Promise<ChannelActivity> {
+  return withTenant(tenantId, async (db) => {
+    const inbound = (await db.execute(sql`
+      SELECT channel, external_message_id AS "externalMessageId", received_at AS "receivedAt"
+      FROM channel_inbound_messages
+      ORDER BY received_at DESC
+      LIMIT ${limit}
+    `)) as unknown as ChannelActivity['inbound'];
+
+    const conversations = (await db.execute(sql`
+      SELECT c.id, c.channel, c.last_message_at AS "lastMessageAt",
+             (SELECT count(*)::int FROM messages m
+               WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.id) AS messages
+      FROM conversations c
+      WHERE c.tenant_id = ${tenantId}
+        AND c.channel IN ('instagram', 'messenger', 'whatsapp')
+      ORDER BY c.last_message_at DESC
+      LIMIT ${limit}
+    `)) as unknown as ChannelActivity['conversations'];
+
+    const outbound = (await db.execute(sql`
+      SELECT status, left(body, 120) AS body, last_error AS "lastError",
+             created_at AS "createdAt"
+      FROM channel_messages
+      WHERE tenant_id = ${tenantId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `)) as unknown as ChannelActivity['outbound'];
+
+    return { inbound, conversations, outbound };
+  });
+}
+
 /**
  * Stop answering as an account.
  *

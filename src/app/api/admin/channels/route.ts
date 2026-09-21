@@ -4,7 +4,7 @@ import { headers } from 'next/headers';
 import { z } from 'zod';
 import { resolveTenantByHost } from '@/server/context/tenant';
 import {
-  connectChannelAccount, disconnectChannelAccount, listChannelAccounts,
+  channelActivity, connectChannelAccount, disconnectChannelAccount, listChannelAccounts,
 } from '@/server/channels/accounts';
 import { env } from '@/server/config/env';
 
@@ -60,15 +60,26 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** What this dealership has connected. Useful for confirming a connection took. */
+/**
+ * What this dealership has connected, and — with `?activity=1` — what has
+ * actually happened on it.
+ *
+ * The second is for diagnosis. A DM that produces no reply has three very
+ * different causes wearing the same face: never delivered, delivered and not
+ * understood, or answered with the answer stuck. Reasoning from outside
+ * cannot separate them; three lists can.
+ */
 export async function GET(request: NextRequest) {
   const denied = await authorize(request);
   if (denied) return denied;
 
   const tenant = await resolveTenantByHost((await headers()).get('host'));
+  const wantsActivity = new URL(request.url).searchParams.get('activity') === '1';
+
   return NextResponse.json({
     tenant: tenant.slug,
     accounts: await listChannelAccounts(tenant.id),
+    ...(wantsActivity ? { activity: await channelActivity(tenant.id) } : {}),
   });
 }
 
