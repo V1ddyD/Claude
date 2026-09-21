@@ -61,6 +61,11 @@ export default async function SiteLayout({ children }: { children: React.ReactNo
             Prices exclude taxes, registration and dealer fees. Figures shown by the
             assistant are estimates unless stated otherwise.
           </p>
+          <p className="mt-3">
+            <Link href="/privacy" className="text-ink-500 underline-offset-4 hover:underline">
+              Privacy
+            </Link>
+          </p>
         </div>
       </footer>
 
