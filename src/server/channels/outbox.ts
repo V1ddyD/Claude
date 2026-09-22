@@ -5,6 +5,7 @@ import { channelAccounts, channelMessages, type MessagingChannel } from '@/serve
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 import { listActiveTenantIds } from '@/server/db/control-plane';
 import { channelProvider, isWindowClosed } from './provider';
+import { toPlainText } from './plain-text';
 
 /**
  * The outbound side of a messaging channel.
@@ -45,8 +46,16 @@ export async function queueChannelMessage(
   db: TenantDb,
   message: QueuedChannelMessage,
 ): Promise<void> {
+  // Converted here rather than at the send, so what is stored is what was
+  // sent. A row whose body differs from the message the customer received is
+  // a row that makes a support conversation impossible to have.
+  //
+  // Every message goes through it, not just the assistant's: a reply typed by
+  // a salesperson with a bit of markdown in it has the same problem.
+  const body = toPlainText(message.body);
+
   const dedupeKey = createHash('sha256')
-    .update([message.conversationId, message.recipientExternalId, message.body].join('|'))
+    .update([message.conversationId, message.recipientExternalId, body].join('|'))
     .digest('hex')
     .slice(0, 48);
 
@@ -58,7 +67,7 @@ export async function queueChannelMessage(
       channelAccountId: message.channelAccountId,
       conversationId: message.conversationId,
       recipientExternalId: message.recipientExternalId,
-      body: message.body,
+      body,
       sentByType: message.sentByType ?? 'ai',
       sentById: message.sentById,
       dedupeKey,

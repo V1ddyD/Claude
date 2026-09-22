@@ -81,10 +81,34 @@ describe('finding a vehicle', () => {
     }
   });
 
-  it('says so plainly when nothing fits', async () => {
+  it('says so plainly when nothing fits the budget', async () => {
+    // A pickup IS built here, so the only thing that does not fit is the
+    // money. The spec asks for the closest thing we do build rather than a
+    // dead end, so a model may be named — but never without the sentence
+    // saying nothing came in under the figure they gave.
+    const reply = await chat()('I am looking for a pickup under $20,000');
+    expect(reply.text).toMatch(/nothing in the range|closest|nothing quite fits/i);
+
+    const firstModel = reply.text.indexOf('**Sinclair');
+    if (firstModel >= 0) {
+      expect(reply.text.slice(0, firstModel)).toMatch(/nothing in the range|closest/i);
+    }
+  });
+
+  it('says we do not build a shape rather than blaming the budget', async () => {
+    // This used to come back as "nothing quite fits that", which is true and
+    // useless: the price was never the problem, and the customer is left to
+    // wonder whether a smaller number would have found one.
     const reply = await chat()('I am looking for a convertible under $20,000');
-    expect(reply.text).toMatch(/nothing in the range|closest/i);
-    expect(reply.text).not.toMatch(/\*\*Sinclair/);
+    expect(reply.text).toMatch(/convertible/i);
+    expect(reply.text).toMatch(/don't build|doesn't make/i);
+
+    // The range may follow, but only under a sentence saying it is what we do
+    // build — never as a list of things that matched the request.
+    const firstModel = reply.text.indexOf('**Sinclair');
+    if (firstModel >= 0) {
+      expect(reply.text.slice(0, firstModel)).toMatch(/do build|do make/i);
+    }
   });
 
   it('compares two models on catalogue data', async () => {

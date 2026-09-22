@@ -28,6 +28,7 @@ export type Intent =
   | 'recommend'
   | 'delivery'
   | 'specs'
+  | 'body_not_built'
   | 'vehicle_overview'
   | 'powertrains'
   | 'trims'
@@ -74,6 +75,15 @@ export type RankCriterion =
 
 export interface Understanding {
   intent: Intent;
+  /**
+   * A body shape they asked for that nothing in this schema can be.
+   *
+   * The catalogue's body styles are a fixed set, so a hatchback or a
+   * convertible is not "a car we happen not to stock" — it is a car this
+   * dealership does not build, which is a fact worth stating plainly instead
+   * of letting the question fall through to a shrug.
+   */
+  unbuiltBody?: string;
   /** Set whenever the intent is 'rank'. Never guessed for anything else. */
   rankCriterion?: RankCriterion;
   /** Catalogue slugs the message named, in the order they appeared. */
@@ -190,6 +200,9 @@ export function understand(text: string, vocabulary?: Vocabulary): Understanding
     result.justBrowsing = true;
   }
 
+  const unbuilt = findUnbuiltBody(lower);
+  if (unbuilt) result.unbuiltBody = unbuilt;
+
   const criterion = findRankCriterion(lower);
   if (criterion) result.rankCriterion = criterion;
 
@@ -231,7 +244,7 @@ function findRankCriterion(lower: string): RankCriterion | undefined {
   }
 
   if (
-    /\b(fastest|quickest|most powerful|most power|sportiest|highest (horsepower|hp|output)|most hp|biggest engine|top speed|performance model)\b/.test(
+    /\b(fastest|quickest|most powerful|most power|sportiest|sporty|sports cars?|performance cars?|highest (horsepower|hp|output)|most hp|biggest engine|top speed|performance model)\b/.test(
       lower,
     )
   ) {
@@ -294,6 +307,11 @@ function classify(lower: string, parsed: Understanding): Intent {
     return 'test_drive';
   }
 
+  // A shape we do not build. Said before any search is attempted, because
+  // searching for a hatchback returns nothing and "nothing matches that"
+  // leaves the customer wondering whether they asked it wrong.
+  if (parsed.unbuiltBody) return 'body_not_built';
+
   // "Which trim is worth the money" is a question about one car's ladder, so it
   // is tested before the superlatives — every phrasing of it contains a price
   // word, and half of them contain "best".
@@ -337,10 +355,16 @@ function classify(lower: string, parsed: Understanding): Intent {
     // "Range" needs a determiner in front of it. Bare, it is far more often an
     // electric range question — "what sort of range does it do?" — and
     // answering that with a list of every car we build is a non-sequitur.
-    /\b(what (cars|models|vehicles) do you|what do you (make|sell|build|offer)|show me (the |your )?(range|lineup|line.?up|models|cars|everything)|(the|your|full|whole|entire) (range|lineup|line.?up)\b|all (your|the) (cars|models)|what'?s (in the range|available)|list (the |your )?(cars|models))/.test(
+    /\b((what|which) (other |else )?(cars?|models?|vehicles?) (do|have|are|can)|what (else )?do you (make|sell|build|offer|do)|show me (the |your )?(range|lineup|line.?up|models?|cars?|everything)|(the|your|full|whole|entire) (range|lineup|line.?up)\b|all (of )?(your|the) (cars?|models?)|what'?s in the range|list (the |your )?(cars?|models?))/.test(
       lower,
     ) &&
-    parsed.modelSlugs.length === 0
+    parsed.modelSlugs.length === 0 &&
+    // With a budget or a shape attached it is a search, not a request for the
+    // whole catalogue: "what cars do you have under 50k" wants four, not ten.
+    !parsed.budgetCents &&
+    !parsed.bodyStyle &&
+    !parsed.electric &&
+    !parsed.seats
   ) {
     return 'range';
   }
@@ -809,4 +833,29 @@ export function criterionFromReply(text: string): RankCriterion | undefined {
   if (/\b(price|cost|budget|cheap|affordab\w*|money|spend)\b/.test(lower)) return 'price_low';
   if (/\b(popular|common|others|everyone|people)\b/.test(lower)) return 'popularity';
   return undefined;
+}
+
+/**
+ * Body shapes a customer asks for that this catalogue has no way to hold.
+ *
+ * The body style column is a fixed set: sedan, coupe, SUV, crossover, pickup,
+ * wagon. A hatchback or a convertible is therefore not a car this dealership
+ * happens to be out of — it is one they do not build, and saying so is both
+ * true and more useful than a search that returns nothing.
+ *
+ * Kept deliberately short. A word that might be one of the real shapes under
+ * another name ("estate" for a wagon, "saloon" for a sedan) belongs in
+ * findBodyStyle, not here: telling somebody we do not build an estate when the
+ * wagon is sitting on the forecourt would be a lie with a straight face.
+ */
+const UNBUILT_BODIES: [RegExp, string][] = [
+  [/\b(hatch ?backs?|hatches)\b/, 'hatchback'],
+  [/\b(convertibles?|cabriolets?|roadsters?|drop ?tops?|soft ?tops?)\b/, 'convertible'],
+  [/\b(mini ?vans?|mpvs?|people carriers?)\b/, 'minivan'],
+  [/\b(camper ?vans?|motorhomes?)\b/, 'camper van'],
+  [/\b(motor ?(bikes?|cycles?)|scooters?)\b/, 'motorbike'],
+];
+
+function findUnbuiltBody(lower: string): string | undefined {
+  return UNBUILT_BODIES.find(([pattern]) => pattern.test(lower))?.[1];
 }

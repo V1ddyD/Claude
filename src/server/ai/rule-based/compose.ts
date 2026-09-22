@@ -49,9 +49,9 @@ function shortlist<T>(items: T[], cap: number): { shown: T[]; rest: number } {
 function andMore(rest: number, v: Voice, key: string, noun: string): string {
   if (rest === 0) return '';
   return v.pick(key, [
-    `There are ${rest} more ${noun} — want the lot?`,
+    `There are ${rest} more ${noun}. Want the lot?`,
     `${rest} more ${noun} besides. Say the word and I'll list them.`,
-    `That's not all of them — ${rest} more if you want them.`,
+    `That's not all of them. ${rest} more if you want them.`,
   ]);
 }
 
@@ -125,7 +125,7 @@ export function describe(step: Step, seed = 0): string {
     case 'createTradeInRequest':
       return describeRequest(
         result,
-        'That books an appraisal, not a valuation — what your car is worth needs an in-person look.',
+        'That books an appraisal, not a valuation. What your car is worth needs a proper look in person.',
       );
     case 'createFinancingRequest':
       return describeRequest(
@@ -166,7 +166,7 @@ function describeSearch(result: Json, v: Voice): string {
   const { shown, rest } = shortlist(models, 4);
   const lines = shown.map((model) => {
     const tagline = str(model.tagline);
-    return `- **${str(model.name)}** — ${str(model.segment)}, from ${money(model.priceFrom)}${tagline ? `. ${tagline}` : ''}`;
+    return `- **${str(model.name)}**: ${str(model.segment)}, from ${money(model.priceFrom)}${tagline ? `. ${tagline}` : ''}`;
   });
 
   const lead =
@@ -199,7 +199,7 @@ function describeVehicle(result: Json, v: Voice): string {
   ].filter(Boolean);
 
   const parts = [
-    `**${str(result.name)}** — ${str(result.segment)}, from ${money(result.priceFrom)}.`,
+    `**${str(result.name)}**: ${str(result.segment)}, from ${money(result.priceFrom)}.`,
     overview,
     depth.length ? `${capitalise(sentenceList(depth))} to choose from.` : '',
     // Offered on some turns, not all. A reply that ends in the same invitation
@@ -235,7 +235,7 @@ function describePowertrains(result: Json, v: Voice): string {
     ].filter(Boolean);
 
     const what = str(pt.engine) ?? str(pt.motor);
-    return `- **${str(pt.name)}**${what ? ` — ${what}` : ''}\n  ${facts.join(' · ')}`;
+    return `- **${str(pt.name)}**${what ? `: ${what}` : ''}\n  ${facts.join(' · ')}`;
   });
 
   return [lines.join('\n'), andMore(rest, v, 'pt:more', 'engines')]
@@ -256,7 +256,7 @@ function describeTrims(result: Json, v: Voice): string {
     // The dealership's own one-line description of the trim, where they wrote
     // one. It says more about the difference than the price step does.
     const summary = str(t.summary);
-    return `- **${str(t.name)}** — from ${money(t.priceFrom)}${summary ? `. ${summary}` : ''}`;
+    return `- **${str(t.name)}**: from ${money(t.priceFrom)}${summary ? `. ${summary}` : ''}`;
   });
 
   return [lines.join('\n'), andMore(rest, v, 'trim:more', 'trims')]
@@ -276,7 +276,7 @@ function describeColours(result: Json, v: Voice): string {
   const line = (c: Json) => {
     const surcharge = money(c.surcharge);
     const finish = str(c.finish);
-    return `- **${str(c.name)}**${finish ? ` (${finish})` : ''}${surcharge ? ` — ${surcharge}` : ''}`;
+    return `- **${str(c.name)}**${finish ? ` (${finish})` : ''}${surcharge ? `: ${surcharge}` : ''}`;
   };
 
   // Kept apart. A paint and a leather in one list reads as nine paints, three
@@ -301,7 +301,7 @@ function describeColours(result: Json, v: Voice): string {
 
 function describeOptions(result: Json, v: Voice): string {
   const options = list(result.options);
-  if (options.length === 0) return 'That specification has no separate options — everything is standard.';
+  if (options.length === 0) return 'That specification has no separate options. Everything is standard.';
 
   const standard = shortlist(options.filter((o) => o.included === true), 6);
   const extra = shortlist(options.filter((o) => o.included !== true), 6);
@@ -312,7 +312,7 @@ function describeOptions(result: Json, v: Voice): string {
       `Available to add:\n${extra.shown
         .map((o) => {
           const what = str(o.description);
-          return `- **${str(o.name)}** — ${money(o.price) ?? 'price on request'}${what ? `. ${what}` : ''}`;
+          return `- **${str(o.name)}**: ${money(o.price) ?? 'price on request'}${what ? `. ${what}` : ''}`;
         })
         .join('\n')}`,
     );
@@ -350,7 +350,7 @@ function describeFeatures(result: Json, v: Voice): string {
 }
 
 function describePrice(result: Json): string {
-  const lines = list(result.lines).map((l) => `- ${str(l.label)} — ${str(l.amount)}`);
+  const lines = list(result.lines).map((l) => `- ${str(l.label)}: ${str(l.amount)}`);
   const total = money(result.total);
 
   return [
@@ -376,10 +376,10 @@ function describeComparison(result: unknown): string {
         : '',
       num(m.bestElectricRangeKm) ? `up to ${num(m.bestElectricRangeKm)} km electric range` : '',
     ].filter(Boolean);
-    return `- **${str(m.name)}** — ${facts.join(', ')}`;
+    return `- **${str(m.name)}**: ${facts.join(', ')}`;
   });
 
-  return `${lines.join('\n')}\n\nTell me which matters most — space, pace or running cost — and I will narrow it down.`;
+  return `${lines.join('\n')}\n\nTell me which matters most: space, pace or running cost. I'll narrow it down from there.`;
 }
 
 function describeStock(result: Json, v: Voice): string {
@@ -399,7 +399,7 @@ function describeStock(result: Json, v: Voice): string {
     return [
       `- **${str(unit.trim)}** ${str(unit.powertrain)}`,
       colour ? ` in ${colour}` : '',
-      ` — ${money(unit.price)}`,
+      `, ${money(unit.price)}`,
       delivery ? `, available from ${delivery}` : '',
       ` (stock ${str(unit.stockNumber)})`,
     ].join('');
@@ -416,7 +416,7 @@ function describeStock(result: Json, v: Voice): string {
 
   const caveat = v.pick('stock:caveat', [
     'Stock moves, so that is as of today.',
-    "That's today — stock does shift.",
+    "That's today. Stock does shift.",
     'Worth checking again if you leave it a few days; these move.',
   ]);
 
@@ -453,8 +453,8 @@ function describeHours(result: Json): string {
 
   const lines = hours.map((day) =>
     day.closed === true
-      ? `- ${str(day.day)} — closed`
-      : `- ${str(day.day)} — ${str(day.opens)} to ${str(day.closes)}`,
+      ? `- ${str(day.day)}: closed`
+      : `- ${str(day.day)}: ${str(day.opens)} to ${str(day.closes)}`,
   );
 
   const closures = list(result.upcomingClosures).map(
@@ -473,7 +473,7 @@ function describeHours(result: Json): string {
 function describeBooking(result: Json, v: Voice): string {
   const email = str(result.confirmationEmail) ?? '';
   return [
-    `${v.pick('book:lead', ['Booked', "That's booked", 'All booked'])} — **${str(result.when)}**` +
+    `${v.pick('book:lead', ['Booked', "That's booked", 'All booked'])} for **${str(result.when)}**` +
       `${str(result.vehicle) ? ` in the ${str(result.vehicle)}` : ''}.`,
     `Your confirmation code is **${str(result.confirmationCode)}** and the reference is ${str(result.ticketNumber)}.`,
     // Queued is not delivered, and the wording travels with the fact.
@@ -492,13 +492,13 @@ function describeBooking(result: Json, v: Voice): string {
 }
 
 function describeCancellation(result: Json): string {
-  return `Cancelled — that was ${str(result.was)}. The slot is free again, so say the word if you'd like another time.`;
+  return `Cancelled. That was ${str(result.was)}. The slot is free again, so say the word if you'd like another time.`;
 }
 
 function describeRequest(result: Json, next: string): string {
   const queued = str(result.confirmationEmail) === 'queued';
   return [
-    `Done — your reference is **${str(result.ticketNumber)}**.`,
+    `Done. Your reference is **${str(result.ticketNumber)}**.`,
     next,
     queued ? 'A confirmation email is on its way.' : '',
   ]
@@ -507,7 +507,7 @@ function describeRequest(result: Json, next: string): string {
 }
 
 function describeHandoff(result: Json): string {
-  return `I have passed this to a specialist — your reference is **${str(result.ticketNumber)}**. They will follow up; they have not replied yet.`;
+  return `I've passed this to a specialist. Your reference is **${str(result.ticketNumber)}**. They'll follow up; they haven't replied yet.`;
 }
 
 /**
@@ -530,9 +530,9 @@ function describeRanking(result: Json, v: Voice): string {
   // people are buying, and saying so costs nothing next to being wrong.
   if (result.enough === false || models.length === 0) {
     return v.pick('rank:none', [
-      "I don't have enough to call that honestly. What I can do is order the range by price, power, electric range or fuel consumption — any of those useful?",
+      "I don't have enough to call that honestly. What I can do is order the range by price, power, electric range or fuel consumption. Any of those useful?",
       "Not enough behind that for me to give you a straight answer, and I'd rather not invent one. I can rank them on price, power, range or economy instead.",
-      "I can't answer that one from anything I actually know. Price, power, electric range and fuel economy I can order for you — say which.",
+      "I can't answer that one from anything I actually know. Price, power, electric range and fuel economy I can order for you. Say which.",
     ]);
   }
 
@@ -540,13 +540,13 @@ function describeRanking(result: Json, v: Voice): string {
   const value = str(leader.value);
 
   const headline = value
-    ? `The **${str(leader.name)}** — ${value}.`
+    ? `The **${str(leader.name)}**, ${value}.`
     : `The **${str(leader.name)}**.`;
 
   const { shown, rest } = shortlist(models.slice(1), 3);
   const others = shown.map((model) => {
     const figure = str(model.value);
-    return `- **${str(model.name)}**${figure ? ` — ${figure}` : ''}`;
+    return `- **${str(model.name)}**${figure ? `: ${figure}` : ''}`;
   });
 
   return [
@@ -584,7 +584,7 @@ function describeTrimLadder(result: Json, v: Voice): string {
       ? ` ${verb} ${sentenceList(kit)}${more > 0 ? `, and ${more} more` : ''}.`
       : '';
 
-    return `- **${str(trim.name)}** — from ${money(trim.priceFrom)}${step ? ` (${step} more than the one below)` : ''}.${gained}`;
+    return `- **${str(trim.name)}**: from ${money(trim.priceFrom)}${step ? ` (${step} more than the one below)` : ''}.${gained}`;
   });
 
   const best = str(result.bestStepUp);
@@ -598,12 +598,12 @@ function describeTrimLadder(result: Json, v: Voice): string {
           'Purely on the arithmetic',
           'If you go strictly on what you get for the money',
           'On paper, at least',
-        ])}, the **${str(winner.name)}** is the step that earns its keep — it adds the most kit for what it costs. ${v.pick('value:caveat', [
+        ])}, the **${str(winner.name)}** is the step that earns its keep. It adds the most kit for what it costs. ${v.pick('value:caveat', [
           "Whether it's the right one for you is a different question, mind.",
           'That said, the one you want is the one with the kit you\'ll actually use.',
           "Worth saying that's arithmetic, not advice.",
         ])} Happy to go through any of them properly.`
-      : "Honestly, none of the steps stands out on the numbers — it comes down to which kit you'd actually use. Tell me what matters to you and I'll tell you which one has it.",
+      : "Honestly, none of the steps stands out on the numbers. It comes down to which kit you'd actually use. Tell me what matters to you and I'll tell you which one has it.",
   ]
     .filter(Boolean)
     .join('\n\n');

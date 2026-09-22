@@ -95,10 +95,10 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
           `Hello, and welcome to ${digest.brandName}. I can talk you through the range, ` +
             "work out prices and finance, tell you what's on the ground today, or get " +
             'you booked in for a drive. What would be most useful?',
-          `Hi there. I'm here to help with anything ${digest.brandName} — what we build, ` +
+          `Hi there. I'm here to help with anything ${digest.brandName}: what we build, ` +
             "what it costs, what's in stock, or booking you a test drive. Where shall we start?",
           `Welcome to ${digest.brandName}. Ask me about any of the cars, prices, finance, ` +
-            'or what we have here right now — and I can book you a drive whenever you like. ' +
+            'or what we have here right now. I can also book you a drive whenever you like. ' +
             'What are you after?',
         ]),
       );
@@ -123,7 +123,7 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
     case 'compare':
       return m.comparisonSlugs.length >= 2
         ? call(t('compareVehicles', { modelSlugs: m.comparisonSlugs.slice(0, 3) }))
-        : say(`${v.pick('compare', ['Happy to. Which two should I put side by side?', 'Sure — which two shall I compare?', "Of course. Which pair did you want to look at?"])}\n\n${range(digest)}`);
+        : say(`${v.pick('compare', ['Happy to. Which two should I put side by side?', 'Sure, which two shall I compare?', "Of course. Which pair did you want to look at?"])}\n\n${range(digest)}`);
 
     case 'range':
       return say(
@@ -157,7 +157,7 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
         : say(
             `${v.pick('value:which', [
               'Worth comparing properly.',
-              'Good question — the steps are not all the same value.',
+              'Good question. The steps are not all the same value.',
               'That varies by car.',
             ])} ${ask(m, 'model')}\n\n${range(digest)}`,
           );
@@ -170,6 +170,22 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
 
     case 'specs':
       return specsTurn(m, digest);
+
+    // A shape we do not build. Told plainly, with what we DO build underneath
+    // it, which is the same courtesy the invented-model branch extends: the
+    // customer learns the answer and their next question at the same time.
+    case 'body_not_built':
+      return say(
+        `${v.pick('unbuilt', [
+          `We don't build ${articleFor(m.unbuiltBody!)} ${m.unbuiltBody}, I'm afraid.`,
+          `No ${m.unbuiltBody} in the range, sorry.`,
+          `${digest.brandName} doesn't make ${articleFor(m.unbuiltBody!)} ${m.unbuiltBody}.`,
+        ])} ${v.pick('unbuilt:next', [
+          'Here is everything we do build:',
+          'This is what we do make:',
+          'What we do build:',
+        ])}\n\n${range(digest)}`,
+      );
 
     case 'vehicle_overview':
     case 'price':
@@ -204,12 +220,19 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
       return serviceTurn(m);
 
     default:
-      // Never a bare shrug. If they named a car, we know a great deal about
-      // it — what it is, what it costs, what it is built in — and leading with
-      // that is a real answer to a person who is plainly interested in that
-      // car, with the offer to chase the specific detail riding on top.
-      return m.modelSlug
-        ? call(t('getVehicle', { modelSlug: m.modelSlug }))
+      // Never a bare shrug. If THIS message named a car, we know a great deal
+      // about it, and leading with that is a real answer to someone plainly
+      // interested in it, with the offer to chase the detail riding on top.
+      //
+      // Only this message, though. `m.modelSlug` remembers every car named in
+      // the conversation, which is right for "and what colours does it come
+      // in?" and catastrophic here: once somebody had mentioned the S5, every
+      // message this branch could not parse replied with the S5 overview.
+      // Four questions about other cars in a row got the same paragraph, and
+      // so did "Dude". A remembered slug is not what an unrecognised sentence
+      // is about.
+      return m.latest.modelSlugs.length === 1
+        ? call(t('getVehicle', { modelSlug: m.latest.modelSlugs[0]! }))
         : say(cannotHelp(m));
   }
 }
@@ -616,12 +639,12 @@ function offerToAsk(m: Memory, about: string): string {
   const v = voiceFor(m.seed);
   return sentences(
     v.pick('offer:lead', CANNOT_HELP),
-    `${about}, ${v.pick('offer:team', OFFER_TEAM)} —`,
+    `${about}, ${v.pick('offer:team', OFFER_TEAM)}.`,
     v.pick('offer:ask', [
-      'want me to put it to them?',
-      'shall I ask them for you?',
-      'shall I get them onto it?',
-      'want me to have them come back to you with it?',
+      'Want me to put it to them?',
+      'Shall I ask them for you?',
+      'Shall I get them onto it?',
+      'Want me to have them come back to you with it?',
     ]),
   );
 }
@@ -640,7 +663,7 @@ function followUp(m: Memory, last: Step): string {
       ? offerToAsk(m, 'On build and delivery times for an order')
       : v.pick('stock:drive', [
           "Say the word if you'd like to drive one and I'll check the diary.",
-          'Happy to get you behind the wheel of one — just say.',
+          'Happy to get you behind the wheel of one, just say the word.',
           'I can book you in to see one whenever suits.',
         ]);
   }
@@ -653,8 +676,8 @@ function followUp(m: Memory, last: Step): string {
     if (m.intent === 'unknown') return offerToAsk(m, 'On the specifics you asked about');
     if (m.intent === 'vehicle_overview') {
       return v.pick('overview:next', [
-        'I can go into the engines, the trims, the colours or what we have in stock — whichever is useful.',
-        'Engines, trims, colours, what we have on site — say which and I\'ll open it up.',
+        'I can go into the engines, the trims, the colours or what we have in stock. Just say which.',
+        'Engines, trims, colours, what we have on site. Say which and I\'ll open it up.',
         'Want the engines, the trims, the colours, or what\'s here right now?',
       ]);
     }
@@ -680,7 +703,7 @@ function bookingTurn(m: Memory, steps: Step[]): Decision {
     // when neither is, the enquiry still has to reach a person.
     const missing = askContact(
       m,
-      'There is nothing bookable in the next two weeks — a specialist and a demonstrator ' +
+      'There is nothing bookable in the next two weeks. A specialist and a demonstrator ' +
         'both have to be free. I can ask the team to find you a time.',
     );
     if (missing) return missing;
@@ -837,7 +860,7 @@ function tradeInTurn(m: Memory): Decision {
 }
 
 function handoffTurn(m: Memory): Decision {
-  const missing = askContact(m, 'Of course — I will get a specialist onto this.');
+  const missing = askContact(m, "Of course. I'll get a specialist onto this.");
   if (missing) return missing;
 
   return call(
@@ -936,14 +959,14 @@ function cannotHelp(m: Memory): string {
     v.pick('cannot:can', [
       "Off the top of my head I can talk you through any of the cars, what they cost, how they're specced, what's on the ground today, a finance estimate, or get you booked in for a drive.",
       "What I've got at my fingertips: the range, prices and finance, engines and trims, colours, what's in stock right now, and the diary for test drives.",
-      "I can help with any of the cars themselves — specs, trims, colours, prices, finance, what we've got here — and I can book you a drive.",
+      "I can help with any of the cars themselves: specs, trims, colours, prices, finance, what we've got here. I can book you a drive too.",
       "Ask me about any of the cars, what they cost, what they're built in, what's here today, or booking a drive, and I'll have it for you straight away.",
     ]),
-    `For anything else ${v.pick('cannot:team', OFFER_TEAM)} — ${v.pick('cannot:offer', [
-      'shall I pass it on?',
-      'would you like me to pass it along?',
-      'want me to hand it over to them?',
-      'shall I get them to come back to you?',
+    `For anything else ${v.pick('cannot:team', OFFER_TEAM)}. ${v.pick('cannot:offer', [
+      'Shall I pass it on?',
+      'Would you like me to pass it along?',
+      'Want me to hand it over to them?',
+      'Shall I get them to come back to you?',
     ])}`,
   );
 }
@@ -1006,6 +1029,18 @@ function article(token: string): string {
 }
 
 /**
+ * "a hatchback", not "an hatchback".
+ *
+ * Separate from `article` because that one is for model designations, which
+ * are read out letter by letter: the H of an H5 is said "aitch" and takes
+ * "an", while the H of "hatchback" is said "huh" and does not. One rule
+ * cannot serve both, and sharing it produced "an hatchback".
+ */
+function articleFor(word: string): string {
+  return /^[aeiou]/i.test(word) ? 'an' : 'a';
+}
+
+/**
  * The range, by name and segment — and deliberately without prices.
  *
  * The digest is routing information, not an answer (docs/00-architecture.md
@@ -1014,7 +1049,7 @@ function article(token: string): string {
  * tools are one question away.
  */
 function range(digest: Digest): string {
-  return digest.models.map((model) => `- **${model.name}** — ${model.segment}`).join('\n');
+  return digest.models.map((model) => `- **${model.name}**: ${model.segment}`).join('\n');
 }
 
 /* -------------------------------------------------------------------------- */

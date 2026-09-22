@@ -123,6 +123,8 @@ export interface Memory {
   seed: number;
   /** Which axis a ranking question asked for. Only ever set alongside 'rank'. */
   rankCriterion?: RankCriterion;
+  /** A shape they asked for that this catalogue cannot hold. This turn only. */
+  unbuiltBody?: string;
   modelSlug?: string;
   comparisonSlugs: string[];
   /**
@@ -186,6 +188,7 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
     // asking the same thing are not read the same reply word for word.
     seed: seedFrom(exchanges.length, exchanges.at(-1)?.said ?? ''),
     rankCriterion: latest.rankCriterion,
+    unbuiltBody: latest.unbuiltBody,
     comparisonSlugs: [],
     words: [],
     colourWords: [],
@@ -331,7 +334,7 @@ export const ASKS = {
     'Could I take your name and email address?',
     'What name and email should I put down?',
     'Can I grab your name and email?',
-    'Who am I booking that for — name and email?',
+    'Who shall I put that down for? Name and email is all I need.',
   ],
   consent: [
     'Are you happy for the team to contact you about this?',
@@ -372,12 +375,12 @@ export const ASKS = {
   ],
   vehicle: [
     "What's the year, make, model and rough mileage of your current car?",
-    "What are you driving at the moment — year, make, model and rough mileage?",
+    "What are you driving at the moment? Year, make, model and rough mileage.",
     'Tell me the year, make, model and roughly the mileage?',
   ],
   condition: [
-    'How would you describe its condition — excellent, good, fair or poor?',
-    'What sort of condition is it in — excellent, good, fair or poor?',
+    'How would you describe its condition? Excellent, good, fair or poor.',
+    'What sort of condition is it in? Excellent, good, fair or poor.',
   ],
   /**
    * What matters most, asked when they want a recommendation.
@@ -386,10 +389,10 @@ export const ASKS = {
    * a question nobody can answer and this one takes a word to reply to.
    */
   priority: [
-    'What matters most to you — price, power, running costs, or electric range?',
-    'What are you weighing up most — the price, the performance, the running costs, or the range?',
-    "What are you leaning on most — cost, pace, economy, or range?",
-    'Which of those matters most — what it costs, how quick it is, what it drinks, or how far it goes?',
+    'What matters most to you: price, power, running costs, or electric range?',
+    'What are you weighing up most: the price, the performance, the running costs, or the range?',
+    "What are you leaning on most: cost, pace, economy, or range?",
+    'Which of those matters most: what it costs, how quick it is, what it drinks, or how far it goes?',
   ],
   finance: [
     'Would you like a specialist to confirm the terms?',

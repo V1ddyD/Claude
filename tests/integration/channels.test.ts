@@ -610,7 +610,10 @@ describe('what staff see after a DM', () => {
     expect(['low', 'medium', 'high']).toContain(scored.priority);
 
     const salesperson = staffContext('sales', SINCLAIR_STAFF.sales.id);
-    const list = await withTenant(SINCLAIR_TENANT_ID, (db) => listLeads(db, salesperson));
+    // A generous limit on purpose: what is under test is that a DM lead is
+    // visible through the ordinary portal query at all, not where it happens
+    // to rank against every other lead the suite has created.
+    const list = await withTenant(SINCLAIR_TENANT_ID, (db) => listLeads(db, salesperson, 500));
     const row = list.find((lead) => lead.id === scored.leadId);
 
     expect(row).toBeTruthy();
@@ -678,5 +681,52 @@ describe('what staff see after a DM', () => {
     // In the diary, against the lead the DM created — one record, not two.
     expect(detail!.appointments.map((row) => row.id)).toContain(booked.appointmentId);
     expect(detail!.appointments).toHaveLength(1);
+  });
+});
+
+describe('how a reply reaches Instagram', () => {
+  it('sends plain text, because a DM renders no markup', async () => {
+    const accountId = await connectAccount();
+    const provider = new RecordingProvider({ accepted: true, providerMessageId: 'mid.plain' });
+    setChannelProvider(provider);
+
+    setModelClient(
+      new ScriptedModel([{ text: '**Sinclair S5**: from $56,400.\n\n- **Core**: from $56,400\n- **Premium**: from $58,900' }]),
+    );
+    const { sender, mid } = nextIds();
+
+    const outcome = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: ACCOUNT,
+      externalUserId: sender,
+      externalMessageId: mid,
+      text: 'what trims are there?',
+      requestId: 'plain',
+    });
+    expect(outcome.status).toBe('replied');
+
+    await drainChannelOutbox(SINCLAIR_TENANT_ID);
+
+    // Other cases in this file queue messages too, and the drain is per
+    // tenant, so this one is found by its recipient rather than by position.
+    const mine = provider.sent.filter((message) => message.recipientExternalId === sender);
+    expect(mine).toHaveLength(1);
+    const body = mine[0]!.body;
+
+    // What the customer sees, and what they would have seen before: the
+    // asterisks were being delivered literally.
+    expect(body).not.toContain('**');
+    expect(body).not.toMatch(/^- /m);
+    expect(body).toContain('Sinclair S5: from $56,400.');
+    expect(body).toContain('• Core: from $56,400');
+
+    // The stored row matches what was sent. A transcript that disagrees with
+    // the customer's screen makes a support conversation impossible to have.
+    const [row] = await admin<{ body: string }[]>`
+      SELECT body FROM channel_messages
+       WHERE channel_account_id = ${accountId}
+         AND conversation_id = ${outcome.status === 'replied' ? outcome.conversationId : null}
+    `;
+    expect(row!.body).toBe(body);
   });
 });

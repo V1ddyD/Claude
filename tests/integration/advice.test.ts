@@ -7,6 +7,7 @@ import { respondToMessage } from '../../src/server/ai/conversation';
 import { ensureConversation } from '../../src/server/ai/extraction';
 import { RuleBasedModel } from '../../src/server/ai/rule-based';
 import { saidCannotHelp } from '../../src/server/ai/rule-based/state';
+import { toPlainText } from '../../src/server/channels/plain-text';
 
 /**
  * The questions a customer opens with, none of which name a car.
@@ -282,5 +283,115 @@ describe('how much it says at once', () => {
     // listed two messages later.
     expect(overview.text).toContain(formatted);
     expect(trims.text).toContain(formatted);
+  });
+});
+
+describe('answering the message in front of it', () => {
+  it('does not replay the last car it was told about', async () => {
+    // The bug this exists for: `modelSlug` remembers every car named in the
+    // conversation, so once somebody mentioned the S5, every message the
+    // classifier could not parse replied with the S5 overview. Four different
+    // questions in a row got the same paragraph, and so did "Dude".
+    const say = chat();
+    await say('tell me about the S5');
+
+    const replies = [
+      await say('Dude'),
+      await say('lol'),
+      await say('ok whatever'),
+    ];
+
+    for (const reply of replies) {
+      expect.soft(reply.toolsUsed).toEqual([]);
+      expect.soft(reply.text).not.toContain('Premium Mid-Size SUV');
+    }
+  });
+
+  it('still answers a follow-up about the car under discussion', async () => {
+    // The fix must not go too far the other way: "what colours does it come
+    // in?" names no car and is obviously about the one being discussed.
+    const say = chat();
+    await say('tell me about the S5');
+    const reply = await say('what colours does it come in?');
+
+    expect(reply.toolsUsed).toContain('getVehicleColours');
+  });
+
+  it('gives a different answer to a different question', async () => {
+    const say = chat();
+    await say('tell me about the S5');
+
+    const range = await say('What other car do you guys sell?');
+    const sports = await say('So you guys have sports cars?');
+
+    expect(range.text).toContain('Sinclair T4');
+    expect(sports.toolsUsed).toContain('rankModels');
+    expect(range.text).not.toBe(sports.text);
+  });
+});
+
+describe('a shape we do not build', () => {
+  it('says so, and says what we do build', async () => {
+    const reply = await chat()('Any hatch backs?');
+
+    expect(reply.toolsUsed).toEqual([]);
+    expect(reply.text).toMatch(/hatchback/i);
+    expect(reply.text).toMatch(/don't build|doesn't make|no hatchback/i);
+    // The range underneath, so the answer and the next question arrive together.
+    expect(reply.text).toContain('Sinclair S1');
+  });
+
+  it('gets the article right', async () => {
+    const reply = await chat()('do you sell convertibles?');
+    expect(reply.text).not.toMatch(/\ban convertible\b/i);
+    expect(reply.text).toMatch(/a convertible/i);
+  });
+
+  it('does not claim we lack something we actually build', async () => {
+    // "Estate" is a wagon and "saloon" is a sedan. Telling somebody we do not
+    // build one while it sits on the forecourt would be worse than a shrug.
+    for (const question of ['do you have any estates?', 'any saloons?']) {
+      const reply = await chat()(question);
+      expect.soft(reply.text, question).not.toMatch(/don't build|doesn't make/i);
+    }
+  });
+});
+
+describe('what goes out over Instagram', () => {
+  it('carries no markdown a direct message cannot render', async () => {
+    const say = chat();
+    for (const question of [
+      'tell me about the S5',
+      'which is cheapest?',
+      'best value trim on the S5?',
+      'any E5s in stock?',
+      'what cars do you make?',
+    ]) {
+      const reply = await say(question);
+      const plain = toPlainText(reply.text);
+      expect.soft(plain, question).not.toContain('**');
+      expect.soft(plain, question).not.toMatch(/^- /m);
+    }
+  });
+
+  it('uses no em dashes anywhere in its own copy', async () => {
+    const say = chat();
+    for (const question of [
+      'hello',
+      'tell me about the S5',
+      'what trims are there?',
+      'what colours?',
+      'which is the fastest?',
+      'best value trim on the S5?',
+      'any E5s in stock?',
+      'when are you open?',
+      'where are you?',
+      'what should i buy?',
+      'how big is the boot on the X7?',
+      'Dude',
+    ]) {
+      const reply = await say(question);
+      expect.soft(reply.text, question).not.toContain('—');
+    }
   });
 });

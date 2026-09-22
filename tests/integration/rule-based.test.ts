@@ -194,8 +194,9 @@ describe('the rule-based assistant', () => {
     const handed = await chat.say('Yes, please contact me');
 
     expect(handed.toolsUsed).toContain('requestHumanHandoff');
-    // Never implies a person has already replied.
-    expect(handed.text).toMatch(/not replied yet/i);
+    // Never implies a person has already replied. Matched on the meaning
+    // rather than the exact words: the copy uses contractions now.
+    expect(handed.text).toMatch(/(have ?n(o|')t|has ?n(o|')t|not) replied yet/i);
   });
 
   it('says a combination is not built rather than pricing a different one', async () => {
