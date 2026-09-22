@@ -1,6 +1,6 @@
 import {
   ASKS, CANNOT_HELP, remember,
-  type AskKind, type ConversationState, type Memory, type Step,
+  type AskKind, type ConversationState, type Flow, type Memory, type Step,
 } from './state';
 import {
   voiceFor, sentences,
@@ -125,6 +125,52 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
         ? call(t('compareVehicles', { modelSlugs: m.comparisonSlugs.slice(0, 3) }))
         : say(`${v.pick('compare', ['Happy to. Which two should I put side by side?', 'Sure — which two shall I compare?', "Of course. Which pair did you want to look at?"])}\n\n${range(digest)}`);
 
+    case 'range':
+      return say(
+        `${v.pick('range:lead', [
+          `Here's the whole ${digest.brandName} range:`,
+          `This is everything we build:`,
+          `The full range:`,
+        ])}\n\n${range(digest)}\n\n${v.pick('range:next', [
+          'Say which one catches your eye and I can go into it.',
+          "Point me at one and I'll tell you more.",
+          "Which of those should I open up?",
+        ])}`,
+      );
+
+    // A superlative with a measure behind it. The criterion is always set when
+    // the intent is 'rank' — but a missing one is a question about "the best"
+    // with nothing to rank on, which is the recommendation conversation.
+    case 'rank':
+      return m.rankCriterion
+        ? call(
+            t('rankModels', {
+              criterion: m.rankCriterion,
+              ...(m.bodyStyle ? { bodyStyle: m.bodyStyle } : {}),
+            }),
+          )
+        : say(recommendReply(m, digest));
+
+    case 'best_value':
+      return m.modelSlug
+        ? call(t('rankTrims', { modelSlug: m.modelSlug }))
+        : say(
+            `${v.pick('value:which', [
+              'Worth comparing properly.',
+              'Good question — the steps are not all the same value.',
+              'That varies by car.',
+            ])} ${ask(m, 'model')}\n\n${range(digest)}`,
+          );
+
+    case 'recommend':
+      return say(recommendReply(m, digest));
+
+    case 'delivery':
+      return deliveryTurn(m, digest);
+
+    case 'specs':
+      return specsTurn(m, digest);
+
     case 'vehicle_overview':
     case 'price':
     case 'powertrains':
@@ -158,8 +204,70 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
       return serviceTurn(m);
 
     default:
-      return say(cannotHelp(m));
+      // Never a bare shrug. If they named a car, we know a great deal about
+      // it — what it is, what it costs, what it is built in — and leading with
+      // that is a real answer to a person who is plainly interested in that
+      // car, with the offer to chase the specific detail riding on top.
+      return m.modelSlug
+        ? call(t('getVehicle', { modelSlug: m.modelSlug }))
+        : say(cannotHelp(m));
   }
+}
+
+/**
+ * A measurement we do not hold.
+ *
+ * Boot volumes, kerb weights, tow ratings and 0–60 times are not in this
+ * catalogue, and there is no version of this assistant that should produce
+ * one. What it should never do is make that the customer's problem.
+ *
+ * So the reply is the car — what it is, what it costs, what it is built in,
+ * all of it true — and then the specific figure routed to somebody who has the
+ * brochure open. The customer gets information and a route to the rest of it,
+ * which is what they would get from a salesperson who had to go and look.
+ */
+function specsTurn(m: Memory, digest: Digest): Decision {
+  if (!m.modelSlug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
+  return call(t('getVehicle', { modelSlug: m.modelSlug }));
+}
+
+/**
+ * "What should I buy?"
+ *
+ * Answered with a question, which is what a good salesperson does. The range
+ * is four or five cars and the customer has told us nothing; listing all of
+ * them with every figure attached is not help, it is a brochure, and it is
+ * exactly the wall of text this assistant used to open with.
+ *
+ * One question, with the possible answers named in it, so it takes a single
+ * word to reply to. The answer is read back as a ranking criterion, so
+ * "running costs" produces a real ordering of real figures on the next turn.
+ */
+function recommendReply(m: Memory, digest: Digest): string {
+  const v = voiceFor(m.seed);
+  return sentences(
+    v.pick('rec:lead', [
+      'Happy to help you narrow it down.',
+      "I can help with that.",
+      'Let me point you at the right one.',
+    ]),
+    `There are ${digest.models.length} in the range.`,
+    ask(m, 'priority'),
+  );
+}
+
+/**
+ * How soon they can have one.
+ *
+ * Two different answers, and only one of them is ours to give. A car on the
+ * ground has a date; a factory order does not, because build slots and
+ * shipping are not in any catalogue here. So this answers the half it can from
+ * stock and is explicit that the other half needs a person, rather than
+ * producing a confident "six to eight weeks" out of nowhere.
+ */
+function deliveryTurn(m: Memory, digest: Digest): Decision {
+  if (!m.modelSlug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
+  return call(t('checkInventory', { modelSlug: m.modelSlug }));
 }
 
 /** Everything that needs to know which car we are talking about. */
@@ -393,10 +501,41 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
   return say(compose(m, steps));
 }
 
-/** Tools whose result IS the answer; anything before them was groundwork. */
+/**
+ * Which tool result actually answers each question.
+ *
+ * A turn usually calls two or three tools, and only one of them is the answer.
+ * Asking what is in stock needs the trim and colour lists first — but nobody
+ * asked for those, and printing all three results is how a reply turns into a
+ * wall of text that a customer skims and gives up on.
+ *
+ * So the answer is chosen by what was ASKED, not by what ran last.
+ */
+const ANSWERS_TO: Partial<Record<Flow, string>> = {
+  vehicle_overview: 'getVehicle',
+  specs: 'getVehicle',
+  stock: 'checkInventory',
+  delivery: 'checkInventory',
+  trims: 'getVehicleTrims',
+  colours: 'getVehicleColours',
+  powertrains: 'getVehiclePowertrains',
+  options: 'getVehicleOptions',
+  features: 'getVehicleFeatures',
+  price: 'calculateVehiclePrice',
+  rank: 'rankModels',
+  best_value: 'rankTrims',
+  search_vehicles: 'searchVehicles',
+  compare: 'compareVehicles',
+  finance: 'calculateFinanceEstimate',
+  hours: 'getDealershipHours',
+  location: 'getDealershipInformation',
+};
+
+/** Write tools: the record they created is the answer, whatever ran before. */
 const ANSWERS = new Set([
   'getVehicle',
   'calculateVehiclePrice', 'getVehicleOptions', 'getVehicleFeatures', 'calculateFinanceEstimate',
+  'rankModels', 'rankTrims', 'checkInventory', 'compareVehicles',
   'createTestDrive', 'cancelTestDrive', 'createCallbackRequest', 'createTradeInRequest',
   'createFinancingRequest', 'createSupportTicket', 'requestHumanHandoff',
 ]);
@@ -405,12 +544,34 @@ function compose(m: Memory, steps: Step[]): Decision['text'] {
   const last = steps.at(-1);
   if (!last) return cannotHelp(m);
 
-  const body = ANSWERS.has(last.name)
-    ? describe(last, m.seed)
-    : steps.map(describe).filter(Boolean).join('\n\n');
+  const answer = answerStep(m, steps) ?? last;
+  const body = describe(answer, m.seed);
 
-  const follow = followUp(m, last);
-  return [preamble(m, last), body || cannotHelp(m), follow].filter(Boolean).join('\n\n');
+  const follow = followUp(m, answer);
+  return [preamble(m, answer), body || cannotHelp(m), follow].filter(Boolean).join('\n\n');
+}
+
+/**
+ * The one step worth reading out.
+ *
+ * In order: the tool this intent was asking for, then any tool whose result is
+ * an answer in its own right, then whatever ran last. A failed step is never
+ * chosen as the answer — the error branch above has already dealt with those,
+ * and picking one here would report a lookup failure as the reply to a
+ * question a later tool answered perfectly well.
+ */
+function answerStep(m: Memory, steps: Step[]): Step | undefined {
+  const reversed = [...steps].reverse();
+
+  // LAST matching call, not the first. A turn can call one tool twice — a
+  // budget search that finds nothing is immediately re-run without the budget
+  // — and the second call is the one that answers. Reading the first reported
+  // "nothing matches" while holding a perfectly good list of alternatives.
+  const wanted = ANSWERS_TO[m.intent];
+  const asked = wanted && reversed.find((step) => step.name === wanted && !step.isError);
+  if (asked) return asked;
+
+  return reversed.find((step) => ANSWERS.has(step.name) && !step.isError);
 }
 
 function foundNothing(step: Step): boolean {
@@ -443,15 +604,62 @@ function aColour(word: string): string {
   return /^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`;
 }
 
+/**
+ * An offer to put the question to somebody who can answer it.
+ *
+ * Deliberately built on one of the CANNOT_HELP lines, because that is how the
+ * next turn recognises a "yes please" as accepting THIS offer rather than
+ * agreeing to something else. The wording is a promise the code keeps: say yes
+ * and a ticket is raised with the question on it.
+ */
+function offerToAsk(m: Memory, about: string): string {
+  const v = voiceFor(m.seed);
+  return sentences(
+    v.pick('offer:lead', CANNOT_HELP),
+    `${about}, ${v.pick('offer:team', OFFER_TEAM)} —`,
+    v.pick('offer:ask', [
+      'want me to put it to them?',
+      'shall I ask them for you?',
+      'shall I get them onto it?',
+      'want me to have them come back to you with it?',
+    ]),
+  );
+}
+
 /** One next step, offered only where there is an obvious one. */
 function followUp(m: Memory, last: Step): string {
+  const v = voiceFor(m.seed);
+
   if (last.name === 'calculateFinanceEstimate') return ask(m, 'finance');
+
   if (last.name === 'checkInventory' && !last.isError) {
-    return 'Say the word if you would like to drive one and I will check the diary.';
+    // Two different questions land here. "What's in stock" is answered by the
+    // list; "how soon can I have one" is only half answered by it, because a
+    // factory order's timing is not in any catalogue and must not be invented.
+    return m.intent === 'delivery'
+      ? offerToAsk(m, 'On build and delivery times for an order')
+      : v.pick('stock:drive', [
+          "Say the word if you'd like to drive one and I'll check the diary.",
+          'Happy to get you behind the wheel of one — just say.',
+          'I can book you in to see one whenever suits.',
+        ]);
   }
-  if (last.name === 'getVehicle' && m.intent === 'vehicle_overview') {
-    return 'I can go into the engines, the trims, the colours or what is in stock — whichever is useful.';
+
+  if (last.name === 'getVehicle') {
+    // The catalogue does not hold boot volumes or tow ratings, and this is
+    // where that is handled honestly: real information about the car, then a
+    // route to the figure — never a shrug, and never an invented number.
+    if (m.intent === 'specs') return offerToAsk(m, 'On that exact figure');
+    if (m.intent === 'unknown') return offerToAsk(m, 'On the specifics you asked about');
+    if (m.intent === 'vehicle_overview') {
+      return v.pick('overview:next', [
+        'I can go into the engines, the trims, the colours or what we have in stock — whichever is useful.',
+        'Engines, trims, colours, what we have on site — say which and I\'ll open it up.',
+        'Want the engines, the trims, the colours, or what\'s here right now?',
+      ]);
+    }
   }
+
   return '';
 }
 
@@ -707,19 +915,35 @@ function reasonFrom(m: Memory, fallback: string): string {
 /* Fallbacks                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The reply when nothing else fits.
+ *
+ * Three things, in this order, and the order is the whole point:
+ *
+ *   1. that the answer is worth getting right — not that our database is
+ *      missing a row, which is our problem and not the customer's
+ *   2. what CAN be answered right now, concretely, so the next message is easy
+ *   3. a real offer to put the question to a person, which becomes a ticket
+ *
+ * What it must never be is a dead end. A customer who gets "I don't have that"
+ * and nothing else closes the window, and the dealership never learns they
+ * were there — which is the one outcome this whole system exists to prevent.
+ */
 function cannotHelp(m: Memory): string {
   const v = voiceFor(m.seed);
   return sentences(
     v.pick('cannot:lead', CANNOT_HELP),
     v.pick('cannot:can', [
-      "I can talk you through the range, prices, what's on the ground, a finance estimate, or book you a drive.",
-      "What I'm good for: the cars themselves, prices and finance, what's in stock, and booking a test drive.",
-      "I can help with the range, what things cost, what we've got here, and getting you booked in for a drive.",
+      "Off the top of my head I can talk you through any of the cars, what they cost, how they're specced, what's on the ground today, a finance estimate, or get you booked in for a drive.",
+      "What I've got at my fingertips: the range, prices and finance, engines and trims, colours, what's in stock right now, and the diary for test drives.",
+      "I can help with any of the cars themselves — specs, trims, colours, prices, finance, what we've got here — and I can book you a drive.",
+      "Ask me about any of the cars, what they cost, what they're built in, what's here today, or booking a drive, and I'll have it for you straight away.",
     ]),
-    `If it's something else, ${v.pick('cannot:team', OFFER_TEAM)} — ${v.pick('cannot:offer', [
+    `For anything else ${v.pick('cannot:team', OFFER_TEAM)} — ${v.pick('cannot:offer', [
       'shall I pass it on?',
       'would you like me to pass it along?',
-      'want me to hand it over?',
+      'want me to hand it over to them?',
+      'shall I get them to come back to you?',
     ])}`,
   );
 }

@@ -127,8 +127,16 @@ export async function listConfigurations(db: TenantDb, modelId: string) {
       drivetrain: powertrains.drivetrain,
       horsepower: powertrains.horsepower,
       rangeKm: powertrains.rangeKm,
+      engineDesc: powertrains.engineDesc,
+      motorDesc: powertrains.motorDesc,
+      transmission: powertrains.transmission,
+      torqueNm: powertrains.torqueNm,
+      batteryKwh: powertrains.batteryKwh,
+      consumptionL100: powertrains.consumptionL100,
+      consumptionLe: powertrains.consumptionLe,
       trimCode: trims.code,
       trimName: trims.name,
+      trimSummary: trims.summary,
       tierOrder: trims.tierOrder,
     })
     .from(modelConfigurations)
@@ -282,6 +290,7 @@ async function listOptionsFor(db: TenantDb, configurationId: string) {
       code: options.code,
       name: options.name,
       category: options.category,
+      description: options.description,
       isStandard: optionAvailability.isStandard,
       listPriceCents: options.priceCents,
       overrideCents: optionAvailability.priceOverrideCents,
@@ -300,6 +309,7 @@ async function listOptionsFor(db: TenantDb, configurationId: string) {
     code: r.code,
     name: r.name,
     category: r.category,
+    description: r.description,
     isStandard: r.isStandard,
     priceCents: r.overrideCents ?? r.listPriceCents,
   }));

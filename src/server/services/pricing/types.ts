@@ -36,6 +36,8 @@ export interface PriceableOption {
   code: string;
   name: string;
   category: string;
+  /** The dealership's own description of what the pack contains. */
+  description: string | null;
   /** Included with this trim — selectable, but never charged. */
   isStandard: boolean;
   /** Resolved for this configuration: the override if set, else the list price. */

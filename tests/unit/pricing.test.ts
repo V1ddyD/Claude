@@ -26,10 +26,10 @@ function context(overrides: Partial<BuildContext> = {}): BuildContext {
       { code: 'CHARCOAL', name: 'Charcoal', kind: 'interior', priceDeltaCents: 0 },
     ],
     options: [
-      { code: 'TECH', name: 'Technology Package', category: 'package', isStandard: false, priceCents: 320_000 },
-      { code: 'PERF', name: 'Performance Package', category: 'package', isStandard: false, priceCents: 450_000 },
-      { code: 'TOW', name: 'Towing Package', category: 'utility', isStandard: false, priceCents: 120_000 },
-      { code: 'HEATED', name: 'Heated Seats', category: 'comfort', isStandard: true, priceCents: 65_000 },
+      { code: 'TECH', name: 'Technology Package', category: 'package', description: null, isStandard: false, priceCents: 320_000 },
+      { code: 'PERF', name: 'Performance Package', category: 'package', description: null, isStandard: false, priceCents: 450_000 },
+      { code: 'TOW', name: 'Towing Package', category: 'utility', description: null, isStandard: false, priceCents: 120_000 },
+      { code: 'HEATED', name: 'Heated Seats', category: 'comfort', description: null, isStandard: true, priceCents: 65_000 },
     ],
     rules: [
       { optionCode: 'PERF', rule: 'requires', otherOptionCode: 'TECH' },

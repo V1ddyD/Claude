@@ -1,6 +1,9 @@
 import 'server-only';
 import { and, desc, eq, gt, sql } from 'drizzle-orm';
-import { conversations, type MessagingChannel } from '@/server/db/schema';
+import {
+  channelIdentities, conversations, customers, type MessagingChannel,
+} from '@/server/db/schema';
+import { findLeadForConversation, upsertLead } from '@/server/services/leads';
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 import { respondToMessage } from '@/server/ai/conversation';
 import { enqueue } from '@/server/jobs';
@@ -83,6 +86,14 @@ export async function receiveChannelMessage(
       channel: message.channel,
     });
 
+    await openChannelLead(db, {
+      conversationId,
+      channel: message.channel,
+      externalUserId: message.externalUserId,
+      displayName: message.displayName,
+      customerId: identity.customerId,
+    });
+
     await enqueue(db, 'extract_and_score', { conversationId });
     return { visitorId: identity.visitorId, conversationId };
   });
@@ -117,6 +128,72 @@ export async function receiveChannelMessage(
   });
 
   return { status: 'replied', conversationId: session.conversationId, text: reply.text };
+}
+
+/**
+ * A lead, from the first message, before anybody gives an email address.
+ *
+ * On the website an unidentified visitor deliberately produces no lead: a
+ * browser who types a question and leaves is someone staff cannot act on, and
+ * a portal full of those is a portal nobody opens.
+ *
+ * A direct message is not that. The handle IS a way to reach them — the
+ * salesperson can open Instagram and reply — so "anonymous" is simply untrue
+ * here, and the reason for withholding the lead does not apply. A dealership
+ * wants to know that somebody asked about the S5 at eleven at night, and to be
+ * able to answer them in the morning.
+ *
+ * The customer record carries the handle and no email, which is honest: it is
+ * exactly what we know. An email later, through a booking, merges into the
+ * same conversation's lead rather than starting a second one.
+ */
+async function openChannelLead(
+  db: TenantDb,
+  params: {
+    conversationId: string;
+    channel: MessagingChannel;
+    externalUserId: string;
+    displayName?: string | null;
+    customerId: string | null;
+  },
+): Promise<void> {
+  if (await findLeadForConversation(db, params.conversationId)) return;
+
+  let customerId = params.customerId;
+
+  if (!customerId) {
+    // Named by their handle where we have one. Never invented: a customer row
+    // with a plausible-looking name nobody gave us is worse than a blank.
+    const created = await db
+      .insert(customers)
+      .values({
+        tenantId: db.tenantId,
+        fullName: params.displayName ? `@${params.displayName}` : null,
+        consentSource: params.channel,
+      })
+      .returning({ id: customers.id });
+
+    customerId = created[0]!.id;
+
+    await db
+      .update(channelIdentities)
+      .set({ customerId })
+      .where(
+        and(
+          eq(channelIdentities.tenantId, db.tenantId),
+          eq(channelIdentities.channel, params.channel),
+          eq(channelIdentities.externalUserId, params.externalUserId),
+        ),
+      );
+  }
+
+  // The source says where it came from, so the portal can show a salesperson
+  // that this one is answered by opening Instagram rather than by ringing.
+  await upsertLead(db, {
+    conversationId: params.conversationId,
+    customerId,
+    source: params.channel,
+  });
 }
 
 /**

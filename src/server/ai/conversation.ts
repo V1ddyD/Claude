@@ -60,6 +60,8 @@ const TOOL_STATUS: Record<string, string> = {
   getVehicleFeatures: 'Checking the specification',
   calculateVehiclePrice: 'Working out the price',
   compareVehicles: 'Comparing them',
+  rankModels: 'Putting them in order',
+  rankTrims: 'Working out what each trim adds',
   checkInventory: 'Checking what we have in stock',
   calculateFinanceEstimate: 'Working out an estimate',
   getDealershipInformation: 'Checking our details',

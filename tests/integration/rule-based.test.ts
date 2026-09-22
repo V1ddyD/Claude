@@ -158,9 +158,17 @@ describe('the rule-based assistant', () => {
     const chat = await conversation();
 
     const asked = await chat.say('Does the S5 tow a three horse trailer in winter?');
-    expect(asked.toolsUsed).toEqual([]);
+
+    // A tow rating is not in the catalogue, so none is given — but the reply is
+    // not a shrug either. It leads with what we genuinely know about the car
+    // they asked about, and routes the figure itself to a person.
+    expect(asked.toolsUsed).toContain('getVehicle');
+    expect(asked.text).toContain('S5');
+    // Nothing that could be read as an answer to the question actually asked.
+    expect(asked.text).not.toMatch(/\b(tow|towing|trailer|kg|lbs|pounds)\b/i);
+
     expect(saidCannotHelp(asked.text)).toBe(true);
-    expect(asked.text).toMatch(/pass it on|pass it along|hand it over/i);
+    expect(asked.text).toMatch(/put it to them|ask them|onto it|come back to you/i);
 
     await chat.say('Yes please');
     await chat.say('Dana Okafor, dana@example.com');

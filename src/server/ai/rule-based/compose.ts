@@ -33,6 +33,47 @@ function money(value: unknown): string | undefined {
   return str(obj(value).formatted);
 }
 
+/**
+ * As much of a list as anyone reads, and a count of the rest.
+ *
+ * A dealership's paint range runs to a dozen colours and its options list
+ * longer than that. Printing all of them answers the question and loses the
+ * customer on the way, so the list is cut and the remainder is offered instead
+ * — which is what a person would do, and it keeps the full list one word away.
+ */
+function shortlist<T>(items: T[], cap: number): { shown: T[]; rest: number } {
+  return { shown: items.slice(0, cap), rest: Math.max(0, items.length - cap) };
+}
+
+/** The offer that follows a cut list. Empty when nothing was cut. */
+function andMore(rest: number, v: Voice, key: string, noun: string): string {
+  if (rest === 0) return '';
+  return v.pick(key, [
+    `There are ${rest} more ${noun} — want the lot?`,
+    `${rest} more ${noun} besides. Say the word and I'll list them.`,
+    `That's not all of them — ${rest} more if you want them.`,
+  ]);
+}
+
+/**
+ * Small numbers as words.
+ *
+ * "Three engines" reads as speech; "3 engines" reads as a table. Only up to
+ * ten, because "twenty-seven" is harder to read than the digits are.
+ */
+function count(value: number): string {
+  const words = [
+    'no', 'one', 'two', 'three', 'four', 'five',
+    'six', 'seven', 'eight', 'nine', 'ten',
+  ];
+  return words[value] ?? String(value);
+}
+
+/** A sentence starts with a capital, even when its first word came from data. */
+function capitalise(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** "a, b and c" — an Oxford-free join, because this is prose, not a list. */
 export function sentenceList(items: string[]): string {
   if (items.length <= 1) return items[0] ?? '';
@@ -56,13 +97,17 @@ export function describe(step: Step, seed = 0): string {
     case 'getVehicleColours':
       return describeColours(result, v);
     case 'getVehicleOptions':
-      return describeOptions(result);
+      return describeOptions(result, v);
     case 'getVehicleFeatures':
-      return describeFeatures(result);
+      return describeFeatures(result, v);
     case 'calculateVehiclePrice':
       return describePrice(result);
     case 'compareVehicles':
       return describeComparison(step.result);
+    case 'rankModels':
+      return describeRanking(result, v);
+    case 'rankTrims':
+      return describeTrimLadder(result, v);
     case 'checkInventory':
       return describeStock(result, v);
     case 'calculateFinanceEstimate':
@@ -118,7 +163,8 @@ function describeSearch(result: Json, v: Voice): string {
     ]);
   }
 
-  const lines = models.map((model) => {
+  const { shown, rest } = shortlist(models, 4);
+  const lines = shown.map((model) => {
     const tagline = str(model.tagline);
     return `- **${str(model.name)}** — ${str(model.segment)}, from ${money(model.priceFrom)}${tagline ? `. ${tagline}` : ''}`;
   });
@@ -132,7 +178,9 @@ function describeSearch(result: Json, v: Voice): string {
           `That narrows it to ${models.length}`,
         ]);
 
-  return `${lead}:\n\n${lines.join('\n')}`;
+  return [`${lead}:`, lines.join('\n'), andMore(rest, v, 'search:more', 'that fit')]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function describeVehicle(result: Json, v: Voice): string {
@@ -141,11 +189,19 @@ function describeVehicle(result: Json, v: Voice): string {
   const trims = (result.trims as string[] | undefined) ?? [];
   const overview = str(result.overview);
 
+  // Counted, not listed. Somebody who asked "tell me about the S5" wants to
+  // know what it is; the names of five engines and four trims is a spec sheet
+  // they did not ask for, and it buries the two sentences that answer them.
+  // The counts tell them the detail exists, and the next line offers it.
+  const depth = [
+    powertrains.length ? `${count(powertrains.length)} engine${powertrains.length === 1 ? '' : 's'}` : '',
+    trims.length ? `${count(trims.length)} trim${trims.length === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+
   const parts = [
     `**${str(result.name)}** — ${str(result.segment)}, from ${money(result.priceFrom)}.`,
     overview,
-    powertrains.length ? `Powertrains: ${sentenceList(powertrains)}.` : '',
-    trims.length ? `Trims: ${sentenceList(trims)}.` : '',
+    depth.length ? `${capitalise(sentenceList(depth))} to choose from.` : '',
     // Offered on some turns, not all. A reply that ends in the same invitation
     // every single time is a reply nobody reads the end of.
     maybeNudge(v, 'vehicle:drive', OFFER_DRIVE),
@@ -164,16 +220,27 @@ function describePowertrains(result: Json, v: Voice): string {
     ]);
   }
 
-  const lines = powertrains.map((pt) => {
+  const { shown, rest } = shortlist(powertrains, 4);
+  const lines = shown.map((pt) => {
+    // Every one of these is a column the dealership filled in. An empty one is
+    // left out rather than filled with a plausible figure.
     const facts = [
       num(pt.horsepower) ? `${num(pt.horsepower)} hp` : '',
+      num(pt.torqueNm) ? `${num(pt.torqueNm)} Nm` : '',
       str(pt.drivetrain),
-      num(pt.electricRangeKm) ? `${num(pt.electricRangeKm)} km range` : '',
+      str(pt.transmission),
+      num(pt.electricRangeKm) ? `${num(pt.electricRangeKm)} km on the battery` : '',
+      num(pt.batteryKwh) ? `${num(pt.batteryKwh)} kWh battery` : '',
+      num(pt.fuelConsumptionL100) ? `${num(pt.fuelConsumptionL100)} L/100km` : '',
     ].filter(Boolean);
-    return `- **${str(pt.name)}** — ${facts.join(', ')}`;
+
+    const what = str(pt.engine) ?? str(pt.motor);
+    return `- **${str(pt.name)}**${what ? ` — ${what}` : ''}\n  ${facts.join(' · ')}`;
   });
 
-  return `${lines.join('\n')}`;
+  return [lines.join('\n'), andMore(rest, v, 'pt:more', 'engines')]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function describeTrims(result: Json, v: Voice): string {
@@ -184,7 +251,17 @@ function describeTrims(result: Json, v: Voice): string {
       "I haven't got the trim levels for that car.",
     ]);
   }
-  return trims.map((t) => `- **${str(t.name)}** — from ${money(t.priceFrom)}`).join('\n');
+  const { shown, rest } = shortlist(trims, 5);
+  const lines = shown.map((t) => {
+    // The dealership's own one-line description of the trim, where they wrote
+    // one. It says more about the difference than the price step does.
+    const summary = str(t.summary);
+    return `- **${str(t.name)}** — from ${money(t.priceFrom)}${summary ? `. ${summary}` : ''}`;
+  });
+
+  return [lines.join('\n'), andMore(rest, v, 'trim:more', 'trims')]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function describeColours(result: Json, v: Voice): string {
@@ -204,48 +281,71 @@ function describeColours(result: Json, v: Voice): string {
 
   // Kept apart. A paint and a leather in one list reads as nine paints, three
   // of which the customer would be surprised to find on the outside of the car.
-  const exterior = colours.filter((c) => c.kind !== 'interior').map(line);
-  const interior = colours.filter((c) => c.kind === 'interior').map(line);
+  const exterior = shortlist(colours.filter((c) => c.kind !== 'interior'), 6);
+  const interior = shortlist(colours.filter((c) => c.kind === 'interior'), 4);
+  const rest = exterior.rest + interior.rest;
 
   return [
-    exterior.length ? `Paint:\n${exterior.join('\n')}` : '',
-    interior.length ? `Interior:\n${interior.join('\n')}` : '',
+    exterior.shown.length ? `Paint:\n${exterior.shown.map(line).join('\n')}` : '',
+    interior.shown.length ? `Interior:\n${interior.shown.map(line).join('\n')}` : '',
     v.pick('col:note', [
       'Anything without a figure beside it is included.',
       'Anything with no price next to it comes as standard.',
       "Where there's no figure, it's included.",
     ]),
+    andMore(rest, v, 'col:more', 'colours'),
   ]
     .filter(Boolean)
     .join('\n\n');
 }
 
-function describeOptions(result: Json): string {
+function describeOptions(result: Json, v: Voice): string {
   const options = list(result.options);
   if (options.length === 0) return 'That specification has no separate options — everything is standard.';
 
-  const standard = options.filter((o) => o.included === true);
-  const extra = options.filter((o) => o.included !== true);
+  const standard = shortlist(options.filter((o) => o.included === true), 6);
+  const extra = shortlist(options.filter((o) => o.included !== true), 6);
 
   const parts: string[] = [];
-  if (extra.length) {
+  if (extra.shown.length) {
     parts.push(
-      `Available to add:\n${extra.map((o) => `- **${str(o.name)}** — ${money(o.price) ?? 'price on request'}`).join('\n')}`,
+      `Available to add:\n${extra.shown
+        .map((o) => {
+          const what = str(o.description);
+          return `- **${str(o.name)}** — ${money(o.price) ?? 'price on request'}${what ? `. ${what}` : ''}`;
+        })
+        .join('\n')}`,
     );
   }
-  if (standard.length) {
-    parts.push(`Already included at this trim: ${sentenceList(standard.map((o) => str(o.name) ?? ''))}.`);
+  if (standard.shown.length) {
+    parts.push(
+      `Already included at this trim: ${sentenceList(standard.shown.map((o) => str(o.name) ?? ''))}` +
+        `${standard.rest > 0 ? `, and ${standard.rest} more` : ''}.`,
+    );
   }
-  return parts.join('\n\n');
+  const more = andMore(extra.rest, v, 'opt:more', 'options');
+  return [...parts, more].filter(Boolean).join('\n\n');
 }
 
-function describeFeatures(result: Json): string {
+function describeFeatures(result: Json, v: Voice): string {
   const equipment = obj(result.standardEquipment);
   const categories = Object.entries(equipment);
-  if (categories.length === 0) return 'I do not have the equipment list for that specification.';
+  if (categories.length === 0) return "I don't have the equipment list for that specification.";
 
-  return categories
-    .map(([category, labels]) => `**${category}**: ${sentenceList((labels as string[]) ?? [])}.`)
+  // Three categories, five items each. A full standard-equipment list is forty
+  // lines long and reads as a legal document; this reads as an answer.
+  const { shown, rest } = shortlist(categories, 3);
+
+  const lines = shown.map(([category, value]) => {
+    const labels = shortlist((value as string[]) ?? [], 5);
+    return (
+      `**${category}**: ${sentenceList(labels.shown)}` +
+      `${labels.rest > 0 ? `, and ${labels.rest} more` : ''}.`
+    );
+  });
+
+  return [lines.join('\n\n'), andMore(rest, v, 'feat:more', 'categories')]
+    .filter(Boolean)
     .join('\n\n');
 }
 
@@ -292,7 +392,8 @@ function describeStock(result: Json, v: Voice): string {
     ]);
   }
 
-  const lines = available.map((unit) => {
+  const { shown, rest } = shortlist(available, 3);
+  const lines = shown.map((unit) => {
     const colour = str(unit.exteriorColour);
     const delivery = str(unit.estimatedDelivery);
     return [
@@ -319,7 +420,9 @@ function describeStock(result: Json, v: Voice): string {
     'Worth checking again if you leave it a few days; these move.',
   ]);
 
-  return `${lead}:\n\n${lines.join('\n')}\n\n${caveat}`;
+  return [`${lead}:`, lines.join('\n'), andMore(rest, v, 'stock:more', 'on site'), caveat]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function describeEstimate(result: Json): string {
@@ -405,4 +508,103 @@ function describeRequest(result: Json, next: string): string {
 
 function describeHandoff(result: Json): string {
   return `I have passed this to a specialist — your reference is **${str(result.ticketNumber)}**. They will follow up; they have not replied yet.`;
+}
+
+/**
+ * A ranking, led by the answer rather than by the table.
+ *
+ * The customer asked which one is cheapest, or fastest, or most popular. The
+ * first line answers exactly that in a sentence; the rest of the order follows
+ * for anyone who wants it. Leading with the table makes them do the sorting
+ * again themselves, which is the work they asked to have done.
+ *
+ * The measure is always stated. A ranking without its basis is an opinion
+ * wearing a list's clothes, and this assistant does not have opinions.
+ */
+function describeRanking(result: Json, v: Voice): string {
+  const models = list(result.models);
+  const measure = str(result.measure);
+
+  // Not enough to say. This is the popularity case, and it is the whole reason
+  // the tool reports it separately: an ordering of two enquiries is not what
+  // people are buying, and saying so costs nothing next to being wrong.
+  if (result.enough === false || models.length === 0) {
+    return v.pick('rank:none', [
+      "I don't have enough to call that honestly. What I can do is order the range by price, power, electric range or fuel consumption — any of those useful?",
+      "Not enough behind that for me to give you a straight answer, and I'd rather not invent one. I can rank them on price, power, range or economy instead.",
+      "I can't answer that one from anything I actually know. Price, power, electric range and fuel economy I can order for you — say which.",
+    ]);
+  }
+
+  const leader = models[0]!;
+  const value = str(leader.value);
+
+  const headline = value
+    ? `The **${str(leader.name)}** — ${value}.`
+    : `The **${str(leader.name)}**.`;
+
+  const { shown, rest } = shortlist(models.slice(1), 3);
+  const others = shown.map((model) => {
+    const figure = str(model.value);
+    return `- **${str(model.name)}**${figure ? ` — ${figure}` : ''}`;
+  });
+
+  return [
+    headline,
+    measure ? `That's going on ${measure}.` : '',
+    others.length ? `Then:\n${others.join('\n')}` : '',
+    andMore(rest, v, 'rank:more', 'after that'),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/**
+ * The trim ladder, and what each step actually buys.
+ *
+ * "Which trim is best value" has no factual answer, so none is given. What is
+ * given is the thing the question is really reaching for: what the step costs
+ * and what it adds as standard. Where one step adds more per pound than the
+ * others, that is said — WITH the measure, so it reads as arithmetic rather
+ * than as a recommendation, which is all it is.
+ */
+function describeTrimLadder(result: Json, v: Voice): string {
+  const trims = list(result.trims);
+  if (trims.length === 0) return "I don't have the trim detail for that one.";
+
+  const lines = trims.map((trim, index) => {
+    const step = money(trim.stepUp);
+    const kit = (trim.adds as string[] | undefined) ?? [];
+    const more = num(trim.moreAdds) ?? 0;
+
+    // The bottom rung adds nothing — there is nothing below it. Saying it
+    // "adds" its standard kit reads as though the cheapest car were an upgrade.
+    const verb = index === 0 ? 'Comes with' : 'Adds';
+    const gained = kit.length
+      ? ` ${verb} ${sentenceList(kit)}${more > 0 ? `, and ${more} more` : ''}.`
+      : '';
+
+    return `- **${str(trim.name)}** — from ${money(trim.priceFrom)}${step ? ` (${step} more than the one below)` : ''}.${gained}`;
+  });
+
+  const best = str(result.bestStepUp);
+  const winner = best ? trims.find((trim) => str(trim.code) === best) : undefined;
+
+  return [
+    `The **${str(result.model)}** ladder, cheapest first:`,
+    lines.join('\n'),
+    winner
+      ? `${v.pick('value:lead', [
+          'Purely on the arithmetic',
+          'If you go strictly on what you get for the money',
+          'On paper, at least',
+        ])}, the **${str(winner.name)}** is the step that earns its keep — it adds the most kit for what it costs. ${v.pick('value:caveat', [
+          "Whether it's the right one for you is a different question, mind.",
+          'That said, the one you want is the one with the kit you\'ll actually use.',
+          "Worth saying that's arithmetic, not advice.",
+        ])} Happy to go through any of them properly.`
+      : "Honestly, none of the steps stands out on the numbers — it comes down to which kit you'd actually use. Tell me what matters to you and I'll tell you which one has it.",
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }

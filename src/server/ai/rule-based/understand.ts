@@ -22,6 +22,12 @@
 export type Intent =
   | 'greeting'
   | 'search_vehicles'
+  | 'range'
+  | 'rank'
+  | 'best_value'
+  | 'recommend'
+  | 'delivery'
+  | 'specs'
   | 'vehicle_overview'
   | 'powertrains'
   | 'trims'
@@ -51,8 +57,25 @@ export type Timeframe =
   | 'three_to_six_months'
   | 'over_six_months';
 
+/**
+ * The axis a "which is best" question is asking to be ranked on.
+ *
+ * Mirrors the tool's own enum rather than being a looser vocabulary of its
+ * own: a criterion this recognises but the tool does not accept is a question
+ * that gets classified and then silently dropped.
+ */
+export type RankCriterion =
+  | 'price_low'
+  | 'price_high'
+  | 'power'
+  | 'electric_range'
+  | 'efficiency'
+  | 'popularity';
+
 export interface Understanding {
   intent: Intent;
+  /** Set whenever the intent is 'rank'. Never guessed for anything else. */
+  rankCriterion?: RankCriterion;
   /** Catalogue slugs the message named, in the order they appeared. */
   modelSlugs: string[];
   /**
@@ -167,8 +190,81 @@ export function understand(text: string, vocabulary?: Vocabulary): Understanding
     result.justBrowsing = true;
   }
 
+  const criterion = findRankCriterion(lower);
+  if (criterion) result.rankCriterion = criterion;
+
   result.intent = classify(lower, result);
+  // Carried only where it was actually asked for. A criterion left on a
+  // question that turned out to be about something else is a ranking waiting
+  // to be run against an intent that never wanted one.
+  if (result.intent !== 'rank') delete result.rankCriterion;
   return result;
+}
+
+/**
+ * The axis a superlative is asking about.
+ *
+ * Order matters more than the patterns do. "Cheapest to run" is a question
+ * about fuel, not about price, and "best value" is a question about a trim
+ * ladder rather than about either — so the specific readings are tested before
+ * the general ones, and the bare "cheapest" only wins once they have all
+ * declined it.
+ */
+function findRankCriterion(lower: string): RankCriterion | undefined {
+  // Running costs first: every one of these contains a price word, so testing
+  // them after "cheapest" would read "cheapest to run" as a question about
+  // the price list.
+  if (
+    /\b(cheapest to run|cheap to run|economical|economy|fuel efficient|most efficient|best (fuel )?(economy|mileage|mpg)|least fuel|lowest consumption|frugal|good on (fuel|petrol|gas))\b/.test(
+      lower,
+    )
+  ) {
+    return 'efficiency';
+  }
+
+  if (
+    /\b(most popular|popular(?!\s+(?:options?|packages?|colou?rs?|trims?|features?|extras))|best.?sell\w*|top.?sell\w*|sells the most|biggest seller|most common|everyone.?s (buying|getting)|what (do|are) (people|most people|others) (buy|buying|get|getting)|trending|in demand)\b/.test(
+      lower,
+    )
+  ) {
+    return 'popularity';
+  }
+
+  if (
+    /\b(fastest|quickest|most powerful|most power|sportiest|highest (horsepower|hp|output)|most hp|biggest engine|top speed|performance model)\b/.test(
+      lower,
+    )
+  ) {
+    return 'power';
+  }
+
+  if (
+    /\b(longest range|most range|best range|furthest|farthest|goes the furthest|biggest battery|longest on a charge)\b/.test(
+      lower,
+    )
+  ) {
+    return 'electric_range';
+  }
+
+  // "Your lowest price" is haggling and belongs to a person; "the lowest
+  // priced car" is a fact about the range. Only the second sense is here.
+  if (
+    /\b(cheapest|least expensive|most affordable|entry.?level|budget (option|model|one)|where does the range start|what does the range start at)\b/.test(
+      lower,
+    )
+  ) {
+    return 'price_low';
+  }
+
+  if (
+    /\b(most expensive|dearest|priciest|top of the range|flagship|range.?topping|most premium|highest priced?|top spec model)\b/.test(
+      lower,
+    )
+  ) {
+    return 'price_high';
+  }
+
+  return undefined;
 }
 
 function classify(lower: string, parsed: Understanding): Intent {
@@ -197,8 +293,71 @@ function classify(lower: string, parsed: Understanding): Intent {
   if (/\b(test drives?|drive it|come in and drive|book a drive|driving it)\b/.test(lower)) {
     return 'test_drive';
   }
+
+  // "Which trim is worth the money" is a question about one car's ladder, so it
+  // is tested before the superlatives — every phrasing of it contains a price
+  // word, and half of them contain "best".
+  if (
+    /\b(best value|value for money|worth (it|the extra|the money|the upgrade|the step)|worth (paying|going) up|which trim should|what do (i|you) get for the extra|bang for (your|the) buck)\b/.test(
+      lower,
+    )
+  ) {
+    return 'best_value';
+  }
+
+  // A superlative with an axis behind it. The axis had to be recognised for
+  // this to fire, so there is always a real measure to rank on — "which is
+  // best" on its own is a different question and goes to 'recommend'.
+  if (parsed.rankCriterion) return 'rank';
+
+  // Open-ended, and the only honest reply is a question back. Never when they
+  // have named two cars: that is a comparison and it has its own tool.
+  if (
+    parsed.modelSlugs.length < 2 &&
+    /\b(what should (i|we) (buy|get|go for|look at)|which (one )?(should|would) (i|you)|what do you recommend|any recommendations|recommend (me )?(one|a|something)|help me (choose|decide|pick)|(i'?m |im )?not sure what (i want|to get)|what would you (suggest|recommend|go for)|which is best for|best (car|one) for)\b/.test(
+      lower,
+    )
+  ) {
+    return 'recommend';
+  }
+
+  // How soon one can actually be had. Different from stock: the answer is "how
+  // long", and it comes from what is on the ground plus a person.
+  if (
+    /\b(how (long|soon)|lead time|waiting (list|time)|delivery time|when (can|could|would) (i|we) (get|have|take|collect)|how quickly can|order time|turnaround)\b/.test(
+      lower,
+    )
+  ) {
+    return 'delivery';
+  }
+
+  // The whole range. Placed before the stock check because "what cars do you
+  // have" is asking what we build, not what is on the forecourt today.
+  if (
+    // "Range" needs a determiner in front of it. Bare, it is far more often an
+    // electric range question — "what sort of range does it do?" — and
+    // answering that with a list of every car we build is a non-sequitur.
+    /\b(what (cars|models|vehicles) do you|what do you (make|sell|build|offer)|show me (the |your )?(range|lineup|line.?up|models|cars|everything)|(the|your|full|whole|entire) (range|lineup|line.?up)\b|all (your|the) (cars|models)|what'?s (in the range|available)|list (the |your )?(cars|models))/.test(
+      lower,
+    ) &&
+    parsed.modelSlugs.length === 0
+  ) {
+    return 'range';
+  }
   if (parsed.financeInterest || /\b(per month|a month|each month)\b/.test(lower)) return 'finance';
-  if (/\b(in stock|availab\w*|on the lot|do you have|got any|ready to go)\b/.test(lower)) {
+  // "Available" is the ambiguous one. "Do you have any S5s?" asks what is on
+  // the forecourt; "what trims are available on the S5?" asks what the factory
+  // builds, and answering that with a stock list is answering a different
+  // question. So a message that names a part of the car — a trim, a colour, an
+  // engine, an option — is asking about the CATALOGUE, and only the unmistakably
+  // forecourt phrasings override that.
+  const namesAFacet =
+    /\b(trims?|versions?|grades?|levels?|colou?rs?|paint|engines?|motors?|powertrains?|drivetrains?|options?|packages?|features?|equipment|specs?|kit)\b/.test(
+      lower,
+    );
+  const onTheForecourt = /\b(in stock|on the lot|on the floor|ready to go|got any)\b/.test(lower);
+
+  if (onTheForecourt || (/\b(availab\w*|do you have)\b/.test(lower) && !namesAFacet)) {
     // "What SUVs do you have around 50k?" is a search worded as a stock
     // question. Without a named car there is nothing to check the lot for.
     const searchable = parsed.bodyStyle || parsed.budgetCents || parsed.electric || parsed.seats;
@@ -223,6 +382,23 @@ function classify(lower: string, parsed: Understanding): Intent {
     return 'powertrains';
   }
   if (/\b(trims?|versions?|grades?|levels?)\b/.test(lower)) return 'trims';
+
+  // A measurement question. The catalogue holds engines, trims, colours,
+  // options and equipment — it does not hold boot volumes, kerb weights or
+  // tow ratings, and no amount of pattern matching will conjure one.
+  //
+  // Recognising them anyway is the point. A question that is CLASSIFIED can be
+  // answered with what we do know about that car plus a real route to the
+  // figure; a question that falls through to 'unknown' gets a shrug. The
+  // difference to the customer is the difference between a salesperson and a
+  // switchboard.
+  if (
+    /\b(boot|trunk|cargo|luggage|load space|legroom|headroom|dimensions?|length|width|height|wheelbase|ground clearance|weight|kerb weight|curb weight|tow\w*|payload|turning circle|tyre|tire|wheel size|0.?60|0.?100|zero to sixty|acceleration|top speed|safety rating|ncap|crash test)\b/.test(
+      lower,
+    )
+  ) {
+    return 'specs';
+  }
   if (/\b(how much|prices?|costs?|msrp|starting at|starts at)\b/.test(lower)) return 'price';
   if (/\b(thanks|thank you|cheers|appreciate)\b/.test(lower)) return 'thanks';
   if (/^\s*(hi|hello|hey|good (morning|afternoon|evening))\b/.test(lower)) return 'greeting';
@@ -250,8 +426,17 @@ function classify(lower: string, parsed: Understanding): Intent {
   return 'unknown';
 }
 
+/**
+ * Haggling, as opposed to asking which car costs least.
+ *
+ * "What's your lowest?" and "which is the cheapest one you make?" are
+ * different questions with different right answers — one goes to a person who
+ * can actually move on price, the other is a fact about the range. So the
+ * price words here all carry a second-person aim: it is a price being asked
+ * OF US, not a price being compared BETWEEN cars.
+ */
 function isNegotiating(lower: string): boolean {
-  return /\b(best price|best you can do|discount|deal on|knock (off|something)|beat (that|this)|haggl\w*|negotiat\w*|cash price|lowest)\b/.test(
+  return /\b(best price|best you can do|discount|deal on|knock (off|something)|beat (that|this)|haggl\w*|negotiat\w*|cash price|(your|the) lowest\b(?! priced)|lowest you)\b/.test(
     lower,
   );
 }
@@ -599,4 +784,29 @@ export function chosenFromOffer(offered: string, said: string): string | undefin
 
   const matched = labels.filter((label) => saidMatchesSlot(label, said));
   return matched.length === 1 ? matched[0] : undefined;
+}
+
+/**
+ * A criterion given in direct answer to "what matters most?".
+ *
+ * Deliberately looser than the superlative patterns, and used ONLY after the
+ * assistant has asked. "Price" on its own is not a request to rank the range
+ * by price — it is half a dozen other questions — but "price" said straight
+ * after being asked what matters most is exactly that, and a customer who
+ * answers the question they were asked should not be told it was not
+ * understood.
+ */
+export function criterionFromReply(text: string): RankCriterion | undefined {
+  const direct = findRankCriterion(text.toLowerCase());
+  if (direct) return direct;
+
+  const lower = text.toLowerCase();
+  if (/\b(running costs?|fuel|petrol|diesel|mpg|economy|efficien\w*|consumption)\b/.test(lower)) {
+    return 'efficiency';
+  }
+  if (/\b(range|charge|charging|battery|electric)\b/.test(lower)) return 'electric_range';
+  if (/\b(power|performance|speed|fast|pace|sporty|quick)\b/.test(lower)) return 'power';
+  if (/\b(price|cost|budget|cheap|affordab\w*|money|spend)\b/.test(lower)) return 'price_low';
+  if (/\b(popular|common|others|everyone|people)\b/.test(lower)) return 'popularity';
+  return undefined;
 }

@@ -7,6 +7,7 @@ import {
   getVehicleOptions, compareVehicles, calculateFinanceEstimateTool,
   getDealershipInformation, getDealershipHours, getVehicleFeatures,
 } from './read/advice-tools';
+import { rankModels, rankTrims } from './read/recommend-tools';
 import { getAvailableTestDriveSlots_tool } from './read/booking-tools';
 import { createTestDriveTool } from './write/create-test-drive';
 import { cancelTestDriveTool } from './write/cancel';
@@ -44,6 +45,8 @@ export const TOOLS: AnyTool[] = [
   checkInventory,
 
   // Advice
+  rankModels,
+  rankTrims,
   calculateFinanceEstimateTool,
   getDealershipInformation,
   getDealershipHours,

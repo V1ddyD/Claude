@@ -81,6 +81,22 @@ export const getVehicle = defineTool({
   },
   project: ({ model, configurations }, ctx) => ({
     ...projectModelSummary(model, ctx.tenant),
+    // The cheapest car you can actually order, not the headline MSRP.
+    //
+    // They are not always the same figure: the base engine is often not
+    // offered on the base trim, so `baseMsrpCents` can name a combination
+    // nobody builds. Quoting it made the overview say "from $52,900" and the
+    // trim list say "from $56,400" two messages later, which reads like a
+    // bait and switch and is really just two different questions being asked
+    // of the same table.
+    ...(configurations.length > 0
+      ? {
+          priceFrom: money(
+            Math.min(...configurations.map((c) => c.priceCents)),
+            ctx.tenant,
+          ),
+        }
+      : {}),
     overview: model.overview,
     powertrains: [...new Set(configurations.map((c) => c.powertrainName))],
     trims: [...new Set(configurations.map((c) => c.trimName))],
@@ -104,6 +120,9 @@ export const getVehiclePowertrains = defineTool({
       return {
         code: c.powertrainCode, name: c.powertrainName, kind: c.powertrainKind,
         drivetrain: c.drivetrain, horsepower: c.horsepower, rangeKm: c.rangeKm,
+        engineDesc: c.engineDesc, motorDesc: c.motorDesc, transmission: c.transmission,
+        torqueNm: c.torqueNm, batteryKwh: c.batteryKwh,
+        consumptionL100: c.consumptionL100, consumptionLe: c.consumptionLe,
         offeredWithTrims: [] as string[],
       };
     }
@@ -133,11 +152,17 @@ export const getVehicleTrims = defineTool({
       (c) => !input.powertrainCode || c.powertrainCode === input.powertrainCode,
     );
 
-    const byTrim = new Map<string, { code: string; name: string; fromPriceCents: number }>();
+    const byTrim = new Map<
+      string,
+      { code: string; name: string; fromPriceCents: number; summary: string | null }
+    >();
     for (const c of configurations) {
       const existing = byTrim.get(c.trimCode);
       if (!existing || c.priceCents < existing.fromPriceCents) {
-        byTrim.set(c.trimCode, { code: c.trimCode, name: c.trimName, fromPriceCents: c.priceCents });
+        byTrim.set(c.trimCode, {
+          code: c.trimCode, name: c.trimName, fromPriceCents: c.priceCents,
+          summary: c.trimSummary,
+        });
       }
     }
     return [...byTrim.values()];

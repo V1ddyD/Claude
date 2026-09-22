@@ -2,7 +2,16 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import type { Sql } from 'postgres';
 import { prepareDatabase, adminConnection } from '../helpers/db';
 import { ScriptedModel } from '../helpers/scripted-model';
-import { SINCLAIR_TENANT_ID, NORTHWIND_TENANT_ID } from '../../db/seeds/sinclair';
+import { SINCLAIR_TENANT_ID, NORTHWIND_TENANT_ID, SINCLAIR_STAFF } from '../../db/seeds/sinclair';
+import { withTenant } from '../../src/server/db/tenant-db';
+import { extractAndScore } from '../../src/server/ai/extraction';
+import { getLeadDetail, listLeads } from '../../src/server/db/repositories/leads';
+import {
+  createTestDrive, getAvailableTestDriveSlots, type TenantTiming,
+} from '../../src/server/services/booking';
+import { ROLE_PERMISSIONS, type Permission } from '../../src/server/auth/permissions';
+import type { StaffContext } from '../../src/server/auth/require-staff';
+import type { StaffRole } from '../../src/server/db/schema';
 import { closeConnections } from '../../src/server/db/client';
 import { setModelClient } from '../../src/server/ai/client';
 import { receiveChannelMessage } from '../../src/server/channels/inbound';
@@ -25,6 +34,25 @@ import {
  */
 
 let admin: Sql;
+
+/** The dealership's own clock and diary rules, as the booking service wants them. */
+const TIMING: TenantTiming = {
+  timezone: 'America/Toronto',
+  locale: 'en-CA',
+  ticketPrefix: 'SIN',
+  settings: { slotMinutes: 60, minNoticeHours: 2, maxHorizonDays: 14 },
+};
+
+/** A signed-in salesperson, with exactly the permissions the role carries. */
+function staffContext(role: StaffRole, id: string): StaffContext {
+  const granted = new Set<Permission>(ROLE_PERMISSIONS[role]);
+  return {
+    authUserId: id, tenantId: SINCLAIR_TENANT_ID, role,
+    fullName: 'Test', email: 't@sinclair.test',
+    can: (p) => granted.has(p),
+    assert: (p) => { if (!granted.has(p)) throw new Error(`missing ${p}`); },
+  };
+}
 
 const ACCOUNT = '17841400000000000';
 const SENDER = 'igsid-4815162342';
@@ -465,5 +493,190 @@ describe('connecting an account', () => {
     `;
     expect(row?.is_active).toBe(false);
     expect(row?.access_token).toBeNull();
+  });
+});
+
+describe('what staff see', () => {
+  it('records a lead from the first message, before anyone gives an email', async () => {
+    setModelClient(new ScriptedModel([{ text: 'The S5 starts at $56,400.' }]));
+    const { sender, mid } = nextIds();
+
+    const outcome = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: ACCOUNT,
+      externalUserId: sender,
+      externalMessageId: mid,
+      text: 'how much is the S5?',
+      displayName: 'jo.buys.cars',
+      requestId: 'test',
+    });
+    expect(outcome.status).toBe('replied');
+    if (outcome.status !== 'replied') return;
+
+    const [lead] = await admin<{ source: string; full_name: string | null; email: string | null }[]>`
+      SELECT l.source, c.full_name, c.email
+      FROM leads l JOIN customers c ON c.id = l.customer_id
+      WHERE l.conversation_id = ${outcome.conversationId}
+    `;
+
+    // On a website an unidentified browser deliberately produces no lead.
+    // A DM is not that: the handle is a way to reach them, so withholding it
+    // would hide a customer staff can actually answer.
+    expect(lead).toBeTruthy();
+    expect(lead?.source).toBe('instagram');
+    // Named by their handle, and honestly: no invented email.
+    expect(lead?.full_name).toBe('@jo.buys.cars');
+    expect(lead?.email).toBeNull();
+  });
+
+  it('keeps one lead when the same person writes again', async () => {
+    setModelClient(new ScriptedModel([{ text: 'one' }, { text: 'two' }]));
+    const { sender } = nextIds();
+
+    const first = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: ACCOUNT,
+      externalUserId: sender,
+      externalMessageId: `mid.l1.${RUN}.${seq}`,
+      text: 'what colours?',
+      requestId: 'test',
+    });
+    await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: ACCOUNT,
+      externalUserId: sender,
+      externalMessageId: `mid.l2.${RUN}.${seq}`,
+      text: 'and the price?',
+      requestId: 'test',
+    });
+
+    if (first.status !== 'replied') return;
+    const [count] = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM leads WHERE conversation_id = ${first.conversationId}
+    `;
+    // Two messages are one enquiry, not two people.
+    expect(count?.n).toBe(1);
+  });
+});
+
+/**
+ * The dealership's side of a direct message.
+ *
+ * The point of the whole channel is that a DM is not a separate product with
+ * its own records. Somebody who messages the Instagram account has to appear
+ * in the same portal, in the same list, with the same priority, as somebody
+ * who typed into the website — otherwise the salesperson has two inboxes and
+ * uses one of them.
+ */
+describe('what staff see after a DM', () => {
+  it('puts the conversation in the portal with a priority against it', async () => {
+    await connectAccount();
+    setModelClient(new ScriptedModel([{ text: 'The S5 starts at $56,400.' }]));
+    const { sender, mid } = nextIds();
+
+    const outcome = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: ACCOUNT,
+      externalUserId: sender,
+      externalMessageId: mid,
+      text: 'looking at the S5, hoping to buy this month. whats the price?',
+      displayName: 'sam.shops',
+      requestId: 'portal-dm',
+    });
+    expect(outcome.status).toBe('replied');
+    if (outcome.status !== 'replied') return;
+
+    // The scoring pass the inbound path queues, run here rather than waited on.
+    setModelClient(
+      new ScriptedModel([
+        {
+          toolUses: [{
+            name: 'record_signals',
+            input: {
+              modelSlug: { value: 's5', confidence: 0.9 },
+              purchaseTimeframe: { value: 'within_30_days', confidence: 0.8 },
+            },
+          }],
+        },
+      ]),
+    );
+    const scored = await extractAndScore({
+      tenantId: SINCLAIR_TENANT_ID,
+      conversationId: outcome.conversationId,
+    });
+
+    // A priority exists and was computed by the rules, not by the assistant.
+    expect(scored.leadId).toBeTruthy();
+    expect(['low', 'medium', 'high']).toContain(scored.priority);
+
+    const salesperson = staffContext('sales', SINCLAIR_STAFF.sales.id);
+    const list = await withTenant(SINCLAIR_TENANT_ID, (db) => listLeads(db, salesperson));
+    const row = list.find((lead) => lead.id === scored.leadId);
+
+    expect(row).toBeTruthy();
+    // Named by the handle, because that is all they have given us — and it is
+    // enough for a salesperson, who can open Instagram and reply.
+    expect(row!.customerName).toBe('@sam.shops');
+    expect(row!.priority).toBe(scored.priority);
+    expect(row!.wants).toBe('Sinclair S5');
+
+    // And the whole exchange is readable, not just the summary.
+    const detail = await withTenant(SINCLAIR_TENANT_ID, (db) =>
+      getLeadDetail(db, salesperson, scored.leadId!),
+    );
+    expect(detail!.transcript.some((m) => m.content?.includes('S5'))).toBe(true);
+  });
+
+  it('shows a test drive booked over Instagram in the diary', async () => {
+    await connectAccount();
+    const { sender } = nextIds();
+
+    // The booking tool is the same one the website drives; what is asserted is
+    // that the appointment lands against the DM's own lead.
+    const conversation = await receiveChannelMessage({
+      channel: 'instagram',
+      externalAccountId: ACCOUNT,
+      externalUserId: sender,
+      externalMessageId: `mid.diary.${RUN}.${seq}`,
+      text: 'can I drive the S5?',
+      displayName: 'pat.drives',
+      requestId: 'portal-drive',
+    });
+    expect(conversation.status).toBe('replied');
+    if (conversation.status !== 'replied') return;
+
+    const [lead] = await admin<{ id: string; customer_id: string }[]>`
+      SELECT id, customer_id FROM leads WHERE conversation_id = ${conversation.conversationId}
+    `;
+    expect(lead).toBeTruthy();
+
+    // The real booking path, not a hand-written row: what is being checked is
+    // that the appointment attaches to the DM's own lead and conversation.
+    const slots = await withTenant(SINCLAIR_TENANT_ID, (db) =>
+      getAvailableTestDriveSlots(db, TIMING, {
+        from: new Date(),
+        to: new Date(Date.now() + 14 * 86_400_000),
+        modelSlug: 's5',
+      }),
+    );
+    expect(slots.length).toBeGreaterThan(0);
+
+    const booked = await withTenant(SINCLAIR_TENANT_ID, (db) =>
+      createTestDrive(db, TIMING, {
+        conversationId: conversation.conversationId,
+        customerId: lead!.customer_id,
+        startsAt: slots[0]!.startsAt,
+        modelSlug: 's5',
+      }),
+    );
+
+    const salesperson = staffContext('sales', SINCLAIR_STAFF.sales.id);
+    const detail = await withTenant(SINCLAIR_TENANT_ID, (db) =>
+      getLeadDetail(db, salesperson, lead!.id),
+    );
+
+    // In the diary, against the lead the DM created — one record, not two.
+    expect(detail!.appointments.map((row) => row.id)).toContain(booked.appointmentId);
+    expect(detail!.appointments).toHaveLength(1);
   });
 });

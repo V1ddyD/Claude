@@ -41,6 +41,9 @@ export const getVehicleOptions = defineTool({
       code: option.code,
       name: option.name,
       category: option.category,
+      // What the pack actually contains. Written by the dealership; it was
+      // being selected out of the query and never shown to anyone.
+      description: option.description ?? null,
       included: option.isStandard,
       price: option.isStandard ? null : money(option.priceCents, ctx.tenant),
     })),

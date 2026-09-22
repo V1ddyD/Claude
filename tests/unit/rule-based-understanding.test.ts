@@ -68,11 +68,14 @@ describe('classifying what was asked', () => {
     expect(understand('tell me about the s5').modelSlugs).toEqual([]);
   });
 
-  it('does not treat naming a car as a question it can answer', () => {
-    // Honest ignorance beats an overview that answers something else.
-    expect(understand('Does the S5 tow a three horse trailer in winter?', RANGE).intent).toBe(
-      'unknown',
-    );
+  it('reads a measurement question as one, rather than as an overview', () => {
+    // A tow rating is not in the catalogue and never will be invented. But the
+    // question is still ABOUT the S5, and classifying it as such is what lets
+    // the reply lead with what we do know and route the figure to a person.
+    // Falling through to 'unknown' produced a shrug, which loses the customer.
+    const parsed = understand('Does the S5 tow a three horse trailer in winter?', RANGE);
+    expect(parsed.intent).toBe('specs');
+    expect(parsed.modelSlugs).toEqual(['s5']);
   });
 
   it('does not read a phone number as a budget', () => {

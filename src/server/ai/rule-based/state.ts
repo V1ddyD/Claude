@@ -1,8 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   understand, nameFromReply, findConfirmationCode, findTradeInVehicle, chosenFromOffer,
-  colourWords,
-  type Intent, type Timeframe, type TradeInVehicle, type Vocabulary,
+  colourWords, criterionFromReply,
+  type Intent, type RankCriterion, type Timeframe, type TradeInVehicle, type Vocabulary,
 } from './understand';
 import { seedFrom } from './voice';
 
@@ -121,6 +121,8 @@ export interface Memory {
    * — which is what keeps a varied assistant testable.
    */
   seed: number;
+  /** Which axis a ranking question asked for. Only ever set alongside 'rank'. */
+  rankCriterion?: RankCriterion;
   modelSlug?: string;
   comparisonSlugs: string[];
   /**
@@ -183,6 +185,7 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
     // identical clothes; the message itself means two different customers
     // asking the same thing are not read the same reply word for word.
     seed: seedFrom(exchanges.length, exchanges.at(-1)?.said ?? ''),
+    rankCriterion: latest.rankCriterion,
     comparisonSlugs: [],
     words: [],
     colourWords: [],
@@ -203,8 +206,14 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
     // A reply to one of our own questions is an answer, not a new question. A
     // contact detail recorded as "the thing we could not answer" would put
     // someone's name in front of staff as their enquiry.
+    //
+    // 'specs' counts as an open question as much as 'unknown' does. A tow
+    // rating or a boot volume is recognised as a question about the car — which
+    // is what lets the reply be useful — but it is still the question staff
+    // need to see on the ticket, word for word, so they can answer THAT rather
+    // than ring somebody up and ask what they wanted.
     if (
-      turn.intent === 'unknown' &&
+      (turn.intent === 'unknown' || turn.intent === 'specs') &&
       !isAsk(exchange.asked) &&
       exchange.said.trim().length >= 12
     ) {
@@ -269,6 +278,24 @@ export function remember(exchanges: Exchange[], vocabulary?: Vocabulary): Memory
     if (vehicle.model) memory.tradeIn.model = vehicle.model;
     if (vehicle.mileageKm !== undefined) memory.tradeIn.mileageKm = vehicle.mileageKm;
     if (vehicle.condition) memory.tradeIn.condition = vehicle.condition;
+  }
+
+  // The assistant asked what matters most and they answered it. That is a
+  // ranking question, even though nothing in the reply is a superlative, and a
+  // customer who answers the question they were asked should never be told it
+  // was not understood.
+  //
+  // Read from the LAST exchange only. An answer given five turns ago is not
+  // still the subject, and applying it inside the loop would make every later
+  // message a ranking question too.
+  const answeredPriority = askedFor(asked, 'priority')
+    ? criterionFromReply(exchanges.at(-1)?.said ?? '')
+    : undefined;
+
+  if (answeredPriority) {
+    memory.intent = 'rank';
+    memory.rankCriterion = answeredPriority;
+    return memory;
   }
 
   // A customer answering a question is not changing the subject. When the last
@@ -352,6 +379,18 @@ export const ASKS = {
     'How would you describe its condition — excellent, good, fair or poor?',
     'What sort of condition is it in — excellent, good, fair or poor?',
   ],
+  /**
+   * What matters most, asked when they want a recommendation.
+   *
+   * One question, with the axes named, because "what are you looking for?" is
+   * a question nobody can answer and this one takes a word to reply to.
+   */
+  priority: [
+    'What matters most to you — price, power, running costs, or electric range?',
+    'What are you weighing up most — the price, the performance, the running costs, or the range?',
+    "What are you leaning on most — cost, pace, economy, or range?",
+    'Which of those matters most — what it costs, how quick it is, what it drinks, or how far it goes?',
+  ],
   finance: [
     'Would you like a specialist to confirm the terms?',
     'Want someone to confirm the actual terms?',
@@ -364,15 +403,23 @@ export type AskKind = keyof typeof ASKS;
 /**
  * Said when no tool can answer the question.
  *
- * Listed, like the asks, because the next turn has to recognise it: an honest
- * "I do not have that" is only useful if the offer that follows can be
- * accepted, and "yes please" means nothing without knowing what it answered.
+ * Listed, like the asks, because the next turn has to recognise it: the offer
+ * that follows is what turns into a ticket, and "yes please" means nothing
+ * without knowing what it answered.
+ *
+ * The WORDING matters more than it looks. "I don't have that confirmed" is
+ * true and useless — it tells the customer about our database when they asked
+ * about a car, and it reads as a shrug. These say the same thing from the
+ * customer's side: the answer is worth getting right, and it is being got.
+ * Nothing here promises a figure we do not have; it promises a person who
+ * does, which is a promise this code then actually keeps by raising a ticket.
  */
 export const CANNOT_HELP = [
-  "I don't have that confirmed, and I won't guess at it.",
-  "I don't have that one confirmed, and I'd rather not guess.",
-  "That's not something I've got confirmed, and guessing wouldn't help you.",
-  "I haven't got that confirmed, and I'm not going to guess at it.",
+  "I'd rather get you a proper answer on that than a half one.",
+  'Let me get you the exact answer on that rather than my best guess.',
+  "I want to get that one exactly right for you, so let me not guess at it.",
+  "That's worth getting right rather than roughly right.",
+  "I'd sooner check that than tell you something that turns out to be wrong.",
 ] as const;
 
 export function askedFor(assistantText: string, kind: AskKind): boolean {
