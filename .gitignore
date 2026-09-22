@@ -15,3 +15,6 @@ coverage/
 
 # Netlify CLI and build output
 .netlify
+
+# TypeScript incremental build cache. Local, regenerated on every typecheck.
+*.tsbuildinfo
