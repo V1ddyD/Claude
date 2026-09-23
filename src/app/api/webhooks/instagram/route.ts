@@ -53,6 +53,9 @@ export async function GET(request: NextRequest) {
   });
 }
 
+/** See the size check in POST. */
+const MAX_BODY_BYTES = 1_000_000;
+
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get('x-request-id') ?? crypto.randomUUID();
 
@@ -60,10 +63,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Webhooks are not configured.' }, { status: 503 });
   }
 
+  // Size first. Verifying a signature means reading and hashing the whole
+  // body, and this endpoint is public: without a ceiling, anybody can make it
+  // read and hash as much as they care to send. Meta's own payloads are a few
+  // kilobytes; a megabyte is room for a large batch and nothing else.
+  const declared = Number(request.headers.get('content-length') ?? '0');
+  if (declared > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
+  }
+
   // Read as text and verify BEFORE parsing. An unverified webhook is an
   // anonymous stranger able to put words in a customer's mouth, start a
   // conversation under a dealership's name, and be answered by its assistant.
   const raw = await request.text();
+  // The header is a claim; the body is the fact.
+  if (Buffer.byteLength(raw, 'utf8') > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
+  }
   if (!verifySignature(raw, request.headers.get('x-hub-signature-256'), messagingSecrets())) {
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
   }

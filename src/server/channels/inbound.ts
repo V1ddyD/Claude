@@ -1,8 +1,11 @@
 import 'server-only';
+import { createHash } from 'node:crypto';
 import { and, desc, eq, gt, sql } from 'drizzle-orm';
 import {
-  channelIdentities, conversations, customers, type MessagingChannel,
+  channelAccounts, channelIdentities, conversations, customers, type MessagingChannel,
 } from '@/server/db/schema';
+import { checkRateLimit } from '@/server/services/limits';
+import { channelProvider, type ChannelProfile } from './provider';
 import { findLeadForConversation, upsertLead } from '@/server/services/leads';
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
 import { respondToMessage } from '@/server/ai/conversation';
@@ -27,6 +30,8 @@ export type InboundOutcome =
   | { status: 'unknown_account' }
   /** Nothing to reply to — a reaction, a read receipt, an empty payload. */
   | { status: 'ignored'; reason: string }
+  /** Too many messages from one sender. Dropped without a reply. */
+  | { status: 'rate_limited' }
   /** A person has the thread. Recorded, no reply sent. */
   | { status: 'handed_off'; conversationId: string }
   | { status: 'replied'; conversationId: string; text: string };
@@ -54,10 +59,51 @@ export interface InboundChannelMessage {
  */
 const THREAD_WINDOW_HOURS = 24;
 
+/**
+ * The longest message the assistant will read.
+ *
+ * The same ceiling as the website's chat endpoint. Anything longer is not a
+ * question about a car, and storing and scanning it costs the dealership for
+ * somebody else's amusement.
+ */
+const MAX_MESSAGE_LENGTH = 2000;
+
+/**
+ * How fast one person may write.
+ *
+ * The website has a limit; this path had none. Every inbound DM produces a
+ * reply, every reply is a call against the account's Instagram quota — two
+ * hundred an hour — and one person pasting in a loop could spend all of it,
+ * leaving every real customer that hour unanswered.
+ *
+ * Generous on purpose. People send three short messages where one long one
+ * would do, and a limit a genuine customer can hit is a bug of its own.
+ */
+const PER_MINUTE = 12;
+const PER_HOUR = 90;
+
+/**
+ * Made safe to store and scan.
+ *
+ * Control characters are removed rather than escaped: they have no place in a
+ * message about a car, and some of them change how text renders in the portal
+ * or in a log line. Whitespace runs are kept as line breaks, because people do
+ * write lists.
+ */
+export function sanitiseInbound(text: string): string {
+  return text
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, MAX_MESSAGE_LENGTH);
+}
+
 export async function receiveChannelMessage(
   message: InboundChannelMessage,
 ): Promise<InboundOutcome> {
-  const text = message.text.trim();
+  const text = sanitiseInbound(message.text);
   if (!text) return { status: 'ignored', reason: 'no text' };
 
   // Claimed BEFORE any work: a redelivery that arrives while the first copy is
@@ -69,6 +115,17 @@ export async function receiveChannelMessage(
   const account = await resolveChannelAccount(message.channel, message.externalAccountId);
   if (!account) return { status: 'unknown_account' };
 
+  // Before any tenant work at all. A sender over the limit costs one counter
+  // increment and nothing else: no rows, no reply, no platform call.
+  if (!(await withinRateLimit(account.channelAccountId, message.externalUserId))) {
+    return { status: 'rate_limited' };
+  }
+
+  // Who they are, looked up once per person and OUTSIDE the transaction: it
+  // is a network call to Meta, and holding a database transaction open across
+  // one is how a slow API becomes a slow database.
+  const label = await senderLabel(account, message);
+
   // Identity, conversation and the scoring job in ONE transaction, so a
   // conversation always has the visitor it belongs to and is always queued for
   // scoring — the same reasoning as the chat endpoint, where a client that
@@ -77,7 +134,7 @@ export async function receiveChannelMessage(
     const identity = await resolveChannelIdentity(db, {
       channel: message.channel,
       externalUserId: message.externalUserId,
-      displayName: message.displayName,
+      displayName: label?.stored ?? null,
     });
 
     const conversationId = await openChannelConversation(db, {
@@ -90,7 +147,7 @@ export async function receiveChannelMessage(
       conversationId,
       channel: message.channel,
       externalUserId: message.externalUserId,
-      displayName: message.displayName,
+      label,
       customerId: identity.customerId,
     });
 
@@ -153,10 +210,26 @@ async function openChannelLead(
     conversationId: string;
     channel: MessagingChannel;
     externalUserId: string;
-    displayName?: string | null;
+    label: SenderLabel | null;
     customerId: string | null;
   },
 ): Promise<void> {
+  // A customer who wrote before names could be looked up has a row with no
+  // name on it. Filled in the first time we learn one, and never over a name
+  // they gave us themselves.
+  if (params.customerId && params.label) {
+    await db
+      .update(customers)
+      .set({ fullName: params.label.customerName })
+      .where(
+        and(
+          eq(customers.tenantId, db.tenantId),
+          eq(customers.id, params.customerId),
+          sql`${customers.fullName} IS NULL`,
+        ),
+      );
+  }
+
   if (await findLeadForConversation(db, params.conversationId)) return;
 
   let customerId = params.customerId;
@@ -168,7 +241,7 @@ async function openChannelLead(
       .insert(customers)
       .values({
         tenantId: db.tenantId,
-        fullName: params.displayName ? `@${params.displayName}` : null,
+        fullName: params.label?.customerName ?? null,
         consentSource: params.channel,
       })
       .returning({ id: customers.id });
@@ -238,4 +311,90 @@ async function openChannelConversation(
     .returning({ id: conversations.id });
 
   return created[0]!.id;
+}
+
+/** Both a sliding minute and a sliding hour, so a burst and a slow drip are both caught. */
+async function withinRateLimit(channelAccountId: string, externalUserId: string): Promise<boolean> {
+  // Hashed: the limiter's table is not tenant-scoped, and a platform user id
+  // is not something it needs to hold in the clear.
+  const subject = createHash('sha256')
+    .update(`${channelAccountId}|${externalUserId}`)
+    .digest('hex')
+    .slice(0, 32);
+
+  const [minute, hour] = await Promise.all([
+    checkRateLimit({ bucket: 'channel-minute', subject, max: PER_MINUTE, windowSeconds: 60 }),
+    checkRateLimit({ bucket: 'channel-hour', subject, max: PER_HOUR, windowSeconds: 3600 }),
+  ]);
+  return minute.allowed && hour.allowed;
+}
+
+interface SenderLabel {
+  /** What goes on the channel identity: the handle, or failing that the name. */
+  stored: string;
+  /** What a salesperson sees on the lead until the customer gives their own. */
+  customerName: string;
+}
+
+/**
+ * The sender, in words a salesperson can use.
+ *
+ * Taken from the webhook when it carries a username, which today it does not,
+ * and otherwise from the platform's profile endpoint — but only the first time:
+ * a sender whose identity already has a name is not looked up again.
+ */
+async function senderLabel(
+  account: { tenantId: string; channelAccountId: string },
+  message: InboundChannelMessage,
+): Promise<SenderLabel | null> {
+  if (message.displayName) return labelFrom({ handle: message.displayName });
+
+  const known = await withTenant(account.tenantId, async (db) => {
+    const [identity] = await db
+      .select({ displayName: channelIdentities.displayName })
+      .from(channelIdentities)
+      .where(
+        and(
+          eq(channelIdentities.tenantId, db.tenantId),
+          eq(channelIdentities.channel, message.channel),
+          eq(channelIdentities.externalUserId, message.externalUserId),
+        ),
+      )
+      .limit(1);
+    if (identity?.displayName) return { name: identity.displayName, token: null };
+
+    const [row] = await db
+      .select({ token: channelAccounts.accessToken })
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, db.tenantId),
+          eq(channelAccounts.id, account.channelAccountId),
+        ),
+      )
+      .limit(1);
+    return { name: null, token: row?.token ?? null };
+  });
+
+  if (known.name) return null;
+  if (!known.token) return null;
+
+  const provider = channelProvider();
+  const profile = provider.fetchProfile
+    ? await provider.fetchProfile({
+        channel: message.channel,
+        externalUserId: message.externalUserId,
+        accessToken: known.token,
+      })
+    : null;
+
+  return profile ? labelFrom(profile) : null;
+}
+
+function labelFrom(profile: ChannelProfile): SenderLabel | null {
+  const { handle, name } = profile;
+  if (handle && name) return { stored: handle, customerName: `${name} (@${handle})` };
+  if (handle) return { stored: handle, customerName: `@${handle}` };
+  if (name) return { stored: name, customerName: name };
+  return null;
 }

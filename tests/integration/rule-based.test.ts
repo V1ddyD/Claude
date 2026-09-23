@@ -67,7 +67,8 @@ describe('the rule-based assistant', () => {
     // codes, then the pricing tool itself.
     const price = await chat.say('How much is the S5 Premium?');
     expect(price.toolsUsed).toContain('calculateVehiclePrice');
-    expect(price.text).toMatch(/Total: \$/);
+    // A total, stated as one, from the pricing engine.
+    expect(price.text).toMatch(/comes to \*\*\$[\d,]+\*\*/);
     expect(price.text).toMatch(/Excludes taxes/i);
   });
 
@@ -104,11 +105,13 @@ describe('the rule-based assistant', () => {
     expect(offered.receipt).toBeUndefined();
 
     const picked = await chat.say('The first one please');
-    // A time is not enough. Nothing is written yet.
+    // A time is not enough. Nothing is written yet. A test drive also needs a
+    // number: the dealership may have to reach them on the day.
     expect(picked.toolsUsed).not.toContain('createTestDrive');
-    expect(picked.text).toMatch(/name and email/i);
+    expect(picked.text).toMatch(/name, email/i);
+    expect(picked.text).toMatch(/number/i);
 
-    const identified = await chat.say('Alex Mercer, alex.mercer@example.com');
+    const identified = await chat.say('Alex Mercer, alex.mercer@example.com, 416 555 0134');
     expect(identified.toolsUsed).not.toContain('createTestDrive');
     // An email address is an identifier, not a permission.
     expect(askedFor(identified.text, 'consent')).toBe(true);
@@ -132,7 +135,12 @@ describe('the rule-based assistant', () => {
     // The booking reached the portal as a lead, with the contact details on it.
     const found = await withTenant(SINCLAIR_TENANT_ID, (db) =>
       db
-        .select({ name: customers.fullName, email: customers.email, priority: leadsTable.priority })
+        .select({
+          name: customers.fullName,
+          email: customers.email,
+          phone: customers.phone,
+          priority: leadsTable.priority,
+        })
         .from(leadsTable)
         .innerJoin(customers, eq(customers.id, leadsTable.customerId))
         .where(
@@ -145,6 +153,7 @@ describe('the rule-based assistant', () => {
     expect(found).toHaveLength(1);
     expect(found[0]!.name).toBe('Alex Mercer');
     expect(found[0]!.email).toBe('alex.mercer@example.com');
+    expect(found[0]!.phone).toBe('416 555 0134');
 
     // And it can be cancelled with the code it just gave out.
     const cancelled = await chat.say(
@@ -168,7 +177,7 @@ describe('the rule-based assistant', () => {
     expect(asked.text).not.toMatch(/\b(tow|towing|trailer|kg|lbs|pounds)\b/i);
 
     expect(saidCannotHelp(asked.text)).toBe(true);
-    expect(asked.text).toMatch(/put it to them|ask them|onto it|come back to you/i);
+    expect(asked.text).toMatch(/put it to them|ask them|onto it|come back to you|pass it on|pass it along|hand it over/i);
 
     await chat.say('Yes please');
     await chat.say('Dana Okafor, dana@example.com');
@@ -207,7 +216,7 @@ describe('the rule-based assistant', () => {
     // The 2.0 Turbo is not offered on the Luxury. Substituting a compatible
     // engine would return a real price for a car they did not ask about.
     expect(asked.toolsUsed).not.toContain('calculateVehiclePrice');
-    expect(asked.text).toMatch(/not offered on the Luxury/i);
+    expect(asked.text).toMatch(/(is not|isn't) offered on the Luxury/i);
     expect(asked.text).toMatch(/3\.0 Turbo AWD/);
     expect(asked.text).not.toMatch(/Total/);
   });
@@ -217,7 +226,9 @@ describe('the rule-based assistant', () => {
 
     const asked = await chat.say('Can I get the S5 Premium in lime green?');
     expect(asked.toolsUsed).toEqual(['getVehicleColours']);
-    expect(asked.text).toMatch(/do not offer a green/i);
+    expect(asked.text).toMatch(/(do not|don't) offer a green/i);
+    // Bad news is not introduced as good news.
+    expect(asked.text).not.toMatch(/^(Absolutely|Of course|Sure thing|Certainly)/);
     expect(asked.text).toContain('Obsidian Black');
   });
 

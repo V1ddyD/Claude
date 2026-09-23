@@ -3,7 +3,7 @@ import { defineTool } from '../define';
 import { savedBuilds } from '@/server/db/schema';
 import * as catalogue from '@/server/db/repositories/catalogue';
 import { priceBuild } from '@/server/services/pricing';
-import { applySignals, upsertLead, resolveCustomer } from '@/server/services/leads';
+import { applySignals, upsertLead, identifyConversationCustomer } from '@/server/services/leads';
 import { notFound } from '@/server/errors';
 
 /**
@@ -106,18 +106,14 @@ export const updateContactPreferences = defineTool({
   }),
   idempotent: (input) => `contact|${input.email.toLowerCase()}`,
   handler: async (ctx, input) => {
-    const customerId = await resolveCustomer(ctx.db, {
+    const identified = await identifyConversationCustomer(ctx.db, ctx.conversationId, {
       fullName: input.fullName,
       email: input.email,
       phone: input.phone ?? null,
       contactConsent: input.contactConsent,
     });
-    if (!customerId) throw notFound('That customer');
-
-    const leadId = await upsertLead(ctx.db, {
-      conversationId: ctx.conversationId,
-      customerId,
-    });
+    if (!identified) throw notFound('That customer');
+    const { leadId } = identified;
 
     await applySignals(
       ctx.db,

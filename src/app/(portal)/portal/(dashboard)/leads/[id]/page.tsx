@@ -184,6 +184,20 @@ export default async function LeadPage({
         </Panel>
 
         <Panel title="Contact">
+          <Row label="Came in via" value={sourceLabel(lead.source)} />
+          {detail.channels.map((identity) => (
+            <Row
+              key={identity.channel}
+              label={channelLabel(identity.channel)}
+              value={
+                identity.displayName
+                  ? identity.channel === 'instagram' && !identity.displayName.includes(' ')
+                    ? `@${identity.displayName}`
+                    : identity.displayName
+                  : 'Handle not available'
+              }
+            />
+          ))}
           <Row label="Email" value={customer.email} />
           <Row label="Phone" value={customer.phone} />
           <Row
@@ -386,4 +400,24 @@ function formatValue(field: string, value: unknown): string {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'string') return value.replace(/_/g, ' ');
   return String(value);
+}
+
+/** Where a lead came from, in the words a salesperson uses. */
+function sourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    ai_assistant: 'Website chat',
+    instagram: 'Instagram DM',
+    messenger: 'Facebook Messenger',
+    whatsapp: 'WhatsApp',
+  };
+  return labels[source] ?? source;
+}
+
+function channelLabel(channel: string): string {
+  const labels: Record<string, string> = {
+    instagram: 'Instagram',
+    messenger: 'Messenger',
+    whatsapp: 'WhatsApp',
+  };
+  return labels[channel] ?? channel;
 }

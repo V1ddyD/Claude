@@ -85,7 +85,7 @@ describe('a specific buyer with a date', () => {
     );
     await conversation.say('Can I test drive it?');
     await conversation.say('The first one please');
-    await conversation.say('Alex Keeler, alex.keeler@example.test');
+    await conversation.say('Alex Keeler, alex.keeler@example.test, 416 555 0101');
     const booked = await conversation.say('Yes, that is fine');
     expect(booked.toolsUsed).toContain('createTestDrive');
 
@@ -115,7 +115,7 @@ describe('a configuration stated but never priced', () => {
     // trim. Extraction offers the words to the catalogue itself.
     await conversation.say('I want the S5 Premium with the 2.0 Turbo. Can I drive it Saturday?');
     await conversation.say('The first one please');
-    await conversation.say('Tess Varga, tess.varga@example.test');
+    await conversation.say('Tess Varga, tess.varga@example.test, 416 555 0102');
     await conversation.say('Yes, that is fine');
 
     await scoreOf(conversationId);

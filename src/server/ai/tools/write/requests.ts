@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../define';
-import { resolveCustomer, applySignals, upsertLead } from '@/server/services/leads';
+import { applySignals, identifyConversationCustomer } from '@/server/services/leads';
 import {
   createCustomerRequest, createTradeIn, createFinancingRequest, requestHandoff,
 } from '@/server/services/tickets';
@@ -29,18 +29,14 @@ async function identify(
   ctx: ToolContext,
   input: { fullName: string; email: string; phone?: string; contactConsent: true },
 ): Promise<{ customerId: string; leadId: string }> {
-  const customerId = await resolveCustomer(ctx.db, {
+  const identified = await identifyConversationCustomer(ctx.db, ctx.conversationId, {
     fullName: input.fullName,
     email: input.email,
     phone: input.phone ?? null,
     contactConsent: input.contactConsent,
   });
-  if (!customerId) throw new AppError('VALIDATION_FAILED', 'Contact details are required.');
-
-  const leadId = await upsertLead(ctx.db, {
-    conversationId: ctx.conversationId,
-    customerId,
-  });
+  if (!identified) throw new AppError('VALIDATION_FAILED', 'Contact details are required.');
+  const { customerId, leadId } = identified;
 
   // Identity the system observed, not inferred: full confidence, source 'form'.
   await applySignals(

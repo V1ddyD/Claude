@@ -135,7 +135,7 @@ describe('limits', () => {
       name: 'createTestDrive',
       input: {
         startsAt: startsAt.toISOString(),
-        fullName: 'Double Booker', email, contactConsent: true,
+        fullName: 'Double Booker', email, phone: '+1 416 555 0100', contactConsent: true,
       },
     });
 
@@ -179,6 +179,7 @@ describe('idempotency', () => {
         startsAt: startsAt.toISOString(),
         fullName: 'Retry Customer',
         email: 'retry@example.test',
+        phone: '+1 416 555 0100',
         contactConsent: true,
       },
     };
@@ -214,7 +215,7 @@ describe('a failed write tool', () => {
           input: {
             startsAt: new Date(Date.now() + 9 * 864e5).toISOString(),
             modelSlug: 'no-such-model',
-            fullName: 'Partial Write', email: 'partial@example.test', contactConsent: true,
+            fullName: 'Partial Write', email: 'partial@example.test', phone: '+1 416 555 0100', contactConsent: true,
           },
         }],
       },
@@ -311,7 +312,7 @@ describe('extraction and scoring', () => {
           name: 'createTestDrive',
           input: {
             startsAt: startsAt.toISOString(),
-            fullName: 'Schema Test', email: 'schema@example.test', contactConsent: true,
+            fullName: 'Schema Test', email: 'schema@example.test', phone: '+1 416 555 0100', contactConsent: true,
           },
         }],
       },

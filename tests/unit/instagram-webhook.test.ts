@@ -280,3 +280,36 @@ describe('where a reply is posted', () => {
     expect(provider).toMatch(/SEND_HOST\[message\.channel\]/);
   });
 });
+
+describe('the size of what it will read', () => {
+  it('refuses an oversized body before hashing it, even with a valid signature', async () => {
+    const { POST } = await loadRoute();
+    // Valid JSON, correctly signed, and far larger than any real delivery.
+    const body = message({ text: 'x'.repeat(1_100_000) });
+
+    const response = await POST(post(body, sign(body)));
+
+    expect(response.status).toBe(413);
+    await deferred.work;
+    expect(received).toHaveLength(0);
+  });
+
+  it('counts bytes, not characters', async () => {
+    const { POST } = await loadRoute();
+    // 400,000 characters, each three bytes: 1.2 MB on the wire.
+    const body = message({ text: '€'.repeat(400_000) });
+
+    const response = await POST(post(body, sign(body)));
+
+    expect(response.status).toBe(413);
+  });
+
+  it('still accepts a normal delivery', async () => {
+    const { POST } = await loadRoute();
+    const body = message({ text: 'how much is the S5?' });
+
+    const response = await POST(post(body, sign(body)));
+
+    expect(response.status).toBe(200);
+  });
+});

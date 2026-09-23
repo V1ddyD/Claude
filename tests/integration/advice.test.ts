@@ -198,7 +198,9 @@ describe('questions the catalogue cannot answer', () => {
 
   it('never invents the measurement', async () => {
     const reply = await chat()('how big is the boot on the X7?');
-    expect(reply.text).not.toMatch(/\b\d+\s?(l\b|litres|liters|cu ?ft|cubic)/i);
+    // A volume in litres or cubic feet. Fuel economy (L/100km) is a real
+    // catalogue figure and is allowed; a boot volume is not.
+    expect(reply.text).not.toMatch(/\b\d+\s?(litres|liters|cu ?ft|cubic|l(?!\/100))\b/i);
   });
 
   it('always offers a route to the answer', async () => {
@@ -211,7 +213,7 @@ describe('questions the catalogue cannot answer', () => {
       // Recognised as the offer that a "yes" can accept, which is what makes
       // the next turn raise a ticket rather than start again.
       expect.soft(saidCannotHelp(reply.text), question).toBe(true);
-      expect.soft(reply.text, question).toMatch(/put it to them|ask them|onto it|come back to you/i);
+      expect.soft(reply.text, question).toMatch(/put it to them|ask them|onto it|come back to you|pass it on|pass it along|hand it over/i);
     }
   });
 });
@@ -252,17 +254,17 @@ describe('how much it says at once', () => {
     if ((counted?.count ?? 0) > shown) expect(reply.text).toMatch(/more|the lot|list them/i);
   });
 
-  it('gives an overview without reciting every engine and trim', async () => {
+  it('gives an overview as a card, not a spec sheet', async () => {
     const reply = await chat()('tell me about the S5');
 
-    const names = await admin<{ name: string }[]>`
-      SELECT p.name FROM powertrains p
-        JOIN vehicle_models m ON m.id = p.model_id
-       WHERE m.tenant_id = ${SINCLAIR_TENANT_ID} AND m.slug = 's5'
-    `;
-    // The detail is offered, not pasted.
-    for (const row of names) expect.soft(reply.text).not.toContain(row.name);
-    expect(reply.text).toMatch(/engines?/i);
+    // One line per fact. The engines are named — a customer asked to be told
+    // about the car — but the per-engine breakdown (torque, gearbox, economy
+    // for each) is offered, not pasted.
+    expect(reply.text).toMatch(/At a glance:/);
+    expect(reply.text).toMatch(/Engines:/);
+    expect(reply.text).not.toMatch(/\bNm\b/);
+    const bullets = reply.text.split('\n').filter((line) => line.startsWith('- '));
+    expect(bullets.length).toBeLessThanOrEqual(9);
   });
 
   it('quotes one starting price, and it is one you can actually order', async () => {

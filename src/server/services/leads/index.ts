@@ -1,7 +1,8 @@
 import 'server-only';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
-  customers, leads, leadSignals, leadEvents, leadScoringRules,
+  customers, leads, leadSignals, leadEvents, leadScoringRules, conversations,
+  channelIdentities,
   type LeadPriority,
 } from '@/server/db/schema';
 import type { TenantDb } from '@/server/db/tenant-db';
@@ -56,6 +57,14 @@ export async function resolveCustomer(
         .set({
           fullName: identity.fullName ?? undefined,
           phone: phone ?? undefined,
+          // A returning customer who agrees to be contacted has agreed. This
+          // used to be dropped: the update carried the name and the phone and
+          // left consent as it was, so somebody who had once said no could
+          // say yes, be booked in, and still not be sent their confirmation.
+          // Only ever set, never cleared: withdrawing consent is its own act.
+          ...(identity.contactConsent
+            ? { contactConsent: true, consentAt: new Date(), consentSource: 'chat' }
+            : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(customers.tenantId, db.tenantId), eq(customers.id, existing[0].id)));
@@ -77,6 +86,165 @@ export async function resolveCustomer(
     .returning({ id: customers.id });
 
   return created[0]!.id;
+}
+
+/**
+ * Tell the customer behind THIS conversation who they are.
+ *
+ * Every write tool needs a customer and a lead, and used to get them in two
+ * independent steps: find or create a customer by email, then find or create
+ * the conversation's lead. Independent is the problem. A direct message opens
+ * a lead from the first message, against a placeholder customer that knows
+ * only the Instagram handle — so when that person then booked a test drive and
+ * gave their name, email and number, step one created a SECOND customer, step
+ * two found the existing lead, and the lead stayed attached to the placeholder.
+ * The portal showed "@handle", no email, no phone, for someone who had given
+ * all three.
+ *
+ * So the conversation's own lead is the starting point:
+ *
+ *   no lead yet        the old behaviour: find or create by email, open a lead
+ *   lead's customer    fill it in — this is the DM case, and the one that
+ *     has no email     matters: the placeholder becomes the real person
+ *     or the same one
+ *   the email belongs  re-point the lead, the conversation and the channel
+ *     to a customer    identity to that customer, so a returning customer is
+ *     we already have  one record rather than two
+ *   the lead's         somebody else's details in the same conversation. The
+ *     customer has a   existing record is left alone — overwriting one
+ *     different email  person's email with another's is the worst version of
+ *                      this bug — and the new details get their own customer
+ */
+export async function identifyConversationCustomer(
+  db: TenantDb,
+  conversationId: string,
+  identity: IdentityHints,
+): Promise<{ customerId: string; leadId: string } | null> {
+  const email = identity.email?.trim().toLowerCase() || null;
+  const phone = identity.phone?.trim() || null;
+  const fullName = identity.fullName?.trim() || null;
+  if (!email && !phone && !fullName) return null;
+
+  const lead = await findLeadForConversation(db, conversationId);
+
+  if (!lead) {
+    const customerId = await resolveCustomer(db, { ...identity, email, phone, fullName });
+    if (!customerId) return null;
+    const leadId = await upsertLead(db, { conversationId, customerId });
+    await linkConversation(db, conversationId, customerId);
+    return { customerId, leadId };
+  }
+
+  const [current] = await db
+    .select({ id: customers.id, email: customers.email })
+    .from(customers)
+    .where(and(eq(customers.tenantId, db.tenantId), eq(customers.id, lead.customerId)))
+    .limit(1);
+
+  const other = email
+    ? (
+        await db
+          .select({ id: customers.id })
+          .from(customers)
+          .where(and(eq(customers.tenantId, db.tenantId), eq(customers.email, email)))
+          .limit(1)
+      )[0]
+    : undefined;
+
+  // A customer we already know by this email, and it is not the one on the
+  // lead. Move the conversation across to them.
+  if (other && other.id !== current?.id) {
+    await db
+      .update(customers)
+      .set({
+        ...(fullName ? { fullName } : {}),
+        ...(phone ? { phone } : {}),
+        ...(identity.contactConsent
+          ? { contactConsent: true, consentAt: new Date(), consentSource: 'chat' }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(customers.tenantId, db.tenantId), eq(customers.id, other.id)));
+
+    await repointLead(db, lead.id, current?.id ?? null, other.id, conversationId);
+    return { customerId: other.id, leadId: lead.id };
+  }
+
+  const sameOrUnset = !current?.email || !email || current.email.toLowerCase() === email;
+
+  if (current && sameOrUnset) {
+    await db
+      .update(customers)
+      .set({
+        ...(fullName ? { fullName } : {}),
+        ...(email ? { email } : {}),
+        ...(phone ? { phone } : {}),
+        ...(identity.contactConsent
+          ? { contactConsent: true, consentAt: new Date(), consentSource: 'chat' }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(customers.tenantId, db.tenantId), eq(customers.id, current.id)));
+
+    await linkConversation(db, conversationId, current.id);
+    return { customerId: current.id, leadId: lead.id };
+  }
+
+  // A different person's details in this conversation. Recorded, and the
+  // existing customer is not touched.
+  const customerId = await resolveCustomer(db, { ...identity, email, phone, fullName });
+  if (!customerId) return null;
+  return { customerId, leadId: lead.id };
+}
+
+/** The conversation row carries its customer too, once there is one. */
+async function linkConversation(db: TenantDb, conversationId: string, customerId: string) {
+  await db
+    .update(conversations)
+    .set({ customerId })
+    .where(and(eq(conversations.tenantId, db.tenantId), eq(conversations.id, conversationId)));
+}
+
+/**
+ * Move a lead from a placeholder customer to the real one.
+ *
+ * The channel identity moves with it, which is what makes the NEXT message from
+ * the same Instagram account arrive already attached to the right person
+ * instead of opening another placeholder.
+ */
+async function repointLead(
+  db: TenantDb,
+  leadId: string,
+  fromCustomerId: string | null,
+  toCustomerId: string,
+  conversationId: string,
+) {
+  await db
+    .update(leads)
+    .set({ customerId: toCustomerId })
+    .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, leadId)));
+
+  await linkConversation(db, conversationId, toCustomerId);
+
+  if (fromCustomerId) {
+    await db
+      .update(channelIdentities)
+      .set({ customerId: toCustomerId })
+      .where(
+        and(
+          eq(channelIdentities.tenantId, db.tenantId),
+          eq(channelIdentities.customerId, fromCustomerId),
+        ),
+      );
+  }
+
+  await db.insert(leadEvents).values({
+    tenantId: db.tenantId,
+    leadId,
+    type: 'customer_identified',
+    actorType: 'customer',
+    summary: 'Matched to an existing customer by email address.',
+  });
 }
 
 export async function findLeadForConversation(db: TenantDb, conversationId: string) {

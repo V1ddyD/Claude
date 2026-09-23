@@ -24,9 +24,29 @@ export type ChannelSendResult =
   | { accepted: true; providerMessageId: string }
   | { accepted: false; error: string; retryable: boolean };
 
+/** Who a sender is, as far as the platform will say. */
+export interface ChannelProfile {
+  /** The @handle, without the @. Instagram only. */
+  handle?: string;
+  /** The name on the profile, if they have set one. */
+  name?: string;
+}
+
 export interface ChannelProvider {
   readonly name: string;
   send(message: OutgoingChannelMessage): Promise<ChannelSendResult>;
+  /**
+   * Look up the person behind a platform id.
+   *
+   * Optional, and best-effort by contract: a profile is a convenience for the
+   * salesperson reading the portal, never a precondition for answering the
+   * customer. Implementations return null rather than throwing.
+   */
+  fetchProfile?(params: {
+    channel: MessagingChannel;
+    externalUserId: string;
+    accessToken: string;
+  }): Promise<ChannelProfile | null>;
 }
 
 /** Pinned rather than floating: a version bump is a decision, not a surprise. */
@@ -106,6 +126,69 @@ class MetaChannelProvider implements ChannelProvider {
       };
     }
   }
+
+  /**
+   * The sender's handle and name, from the platform's user profile endpoint.
+   *
+   * Needed because the messaging webhook carries a numeric id and nothing
+   * else: without this, every DM lead reached the portal as "Unnamed customer"
+   * and a salesperson had no way to find the thread in Instagram.
+   *
+   * Short timeout, and null on any failure. It runs before the customer is
+   * answered, so a slow profile lookup is a slow reply, and a failed one must
+   * cost nothing but the name.
+   */
+  async fetchProfile(params: {
+    channel: MessagingChannel;
+    externalUserId: string;
+    accessToken: string;
+  }): Promise<ChannelProfile | null> {
+    if (params.channel === 'whatsapp') return null;
+
+    const fields = params.channel === 'instagram' ? 'username,name' : 'first_name,last_name,name';
+
+    try {
+      const response = await fetch(
+        `${SEND_HOST[params.channel]}/${GRAPH_VERSION}/${encodeURIComponent(params.externalUserId)}?fields=${fields}`,
+        {
+          headers: { Authorization: `Bearer ${params.accessToken}` },
+          signal: AbortSignal.timeout(3000),
+        },
+      );
+      if (!response.ok) return null;
+
+      const body = (await response.json()) as {
+        username?: unknown;
+        name?: unknown;
+        first_name?: unknown;
+        last_name?: unknown;
+      };
+
+      const handle = cleanProfileText(body.username);
+      const name =
+        cleanProfileText(body.name) ??
+        cleanProfileText([body.first_name, body.last_name].filter((part) => typeof part === 'string').join(' '));
+
+      return handle || name ? { ...(handle ? { handle } : {}), ...(name ? { name } : {}) } : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Profile text is whatever the account holder typed, so it is treated as
+ * untrusted: control characters removed, whitespace collapsed, length capped.
+ * React escapes it on the way to the portal; this keeps it sane on the way in.
+ */
+function cleanProfileText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  return cleaned || undefined;
 }
 
 /**

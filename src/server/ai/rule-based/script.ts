@@ -1,17 +1,22 @@
 import {
-  ASKS, CANNOT_HELP, remember,
+  ASKS, RETRIES, UNSURE, GET_IT_RIGHT, TEAM_OFFER_TAILS, remember,
   type AskKind, type ConversationState, type Flow, type Memory, type Step,
 } from './state';
 import {
-  voiceFor, sentences,
-  ANYTHING_ELSE, GOT_IT, OFFER_TEAM, ON_IT,
+  voiceFor, sentences, paragraphs,
+  ANYTHING_ELSE, GOT_IT, OFFER_TEAM, OFFER_DRIVE, OFFER_HUMAN, OPENERS, ON_IT,
+  type Voice,
 } from './voice';
 import { saidMatchesSlot } from './understand';
 import {
   resolveTrim, resolvePowertrain, resolveColour,
   type ColourRow, type PowertrainRow, type TrimRow,
 } from './resolve';
-import { describe, sentenceList } from './compose';
+import {
+  describe, sentenceList, capitalise, count,
+  describeFeatureCheck, describeCharging, describeTransmission,
+  type DescribeContext,
+} from './compose';
 import { readDigest, localDate, type Digest } from './digest';
 
 /**
@@ -24,8 +29,15 @@ import { readDigest, localDate, type Digest } from './digest';
  * and every step of a booking is inspectable rather than probabilistic.
  *
  * What it does NOT do is understand. It matches patterns, and when it does not
- * recognise one it says so and offers the team, which is the same thing the
- * real assistant is instructed to do when a tool cannot answer.
+ * recognise one it says so, offers what it can do, and after the third miss in
+ * a row stops guessing and offers a person.
+ *
+ * How it sounds is decided in three places, and only three:
+ *
+ *   voice.ts     the banks of interchangeable phrasings, and the rule that a
+ *                phrasing used in the previous reply is not used again
+ *   compose.ts   how a tool result is laid out
+ *   finish()     below: the last pass every reply goes through
  */
 
 export interface ToolCall {
@@ -42,6 +54,11 @@ const say = (text: string): Decision => ({ text, tools: [] });
 const call = (...tools: ToolCall[]): Decision => ({ text: '', tools });
 const t = (name: string, input: Record<string, unknown>): ToolCall => ({ name, input });
 
+/** A voice for this reply, which will not reuse a phrasing from the last one. */
+function voice(m: Memory): Voice {
+  return voiceFor(m.seed, m.asked);
+}
+
 /**
  * One wording of one of the assistant's questions.
  *
@@ -50,7 +67,14 @@ const t = (name: string, input: Record<string, unknown>): ToolCall => ({ name, i
  * words the next turn cannot recognise is a question that gets asked twice.
  */
 function ask(m: Memory, kind: AskKind): string {
-  return voiceFor(m.seed).pick(`ask:${kind}`, ASKS[kind]);
+  return voice(m).pick(`ask:${kind}`, ASKS[kind]);
+}
+
+/** Everything a turn needs besides the memory. */
+interface Turn {
+  m: Memory;
+  digest: Digest;
+  now: Date;
 }
 
 export function decide(system: string, state: ConversationState, now: Date): Decision {
@@ -58,84 +82,290 @@ export function decide(system: string, state: ConversationState, now: Date): Dec
   // The vocabulary is this tenant's own range, read from the catalogue digest
   // it was given. Add a model to the catalogue and it is understood on the
   // next request; there is no list of model names in this code (spec §1).
-  const memory = remember(state.exchanges, { models: digest.models });
+  const m = remember(
+    state.exchanges,
+    { models: digest.models, brand: digest.brandName },
+    state.previousCalls,
+  );
+  const turn: Turn = { m: m.intent === 'more' ? (inFull(state, digest, m, now) ?? m) : m, digest, now };
 
-  return state.steps.length > 0
-    ? continueTurn(memory, state.steps, digest)
-    : openTurn(memory, digest, now);
+  const decision = state.steps.length > 0 ? continueTurn(turn, state.steps) : openTurn(turn);
+  if (turn.m.expanded && decision.text) {
+    decision.text = paragraphs(
+      voice(m).pick('more:lead', ["Here's the full list:", 'Here they all are:', 'Of course, here is everything:']),
+      decision.text,
+    );
+  }
+  return finish(turn.m, decision);
+}
+
+/**
+ * "Yes, show me the rest": the previous question, answered again in full.
+ *
+ * Tool calls are not replayed into the history (their results go stale), so
+ * the list cannot be re-read from the last turn's calls. The customer's
+ * previous message can: it is understood again, exactly as it was, and
+ * answered with nothing cut short, so the full list is as current as the short
+ * one was. Only a question that is answered by reading is re-asked. A previous
+ * message that booked or sent something is never repeated.
+ */
+function inFull(state: ConversationState, digest: Digest, m: Memory, now: Date): Memory | undefined {
+  if (state.exchanges.length < 2) return undefined;
+  const previous = remember(
+    state.exchanges.slice(0, -1),
+    { models: digest.models, brand: digest.brandName },
+    state.previousCalls,
+  );
+  const plan = openTurn({ m: previous, digest, now });
+  if (plan.tools.length === 0 || !plan.tools.every((tool) => REREADABLE.has(tool.name))) return undefined;
+  return { ...previous, seed: m.seed, asked: m.asked, expanded: true };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The last pass                                                               */
+/* -------------------------------------------------------------------------- */
+
+/** Said first when somebody swears in a genuine question, which is still answered. */
+const KEEP_IT_FRIENDLY = [
+  "Happy to help, though let's keep the language friendly.",
+  "Of course, but let's keep it polite, please.",
+  "No problem, though I'd appreciate it if we kept things friendly.",
+] as const;
+
+/** Said first when the same answer is about to go out twice in a row. */
+const RECAP = [
+  'Same as a moment ago, just to recap:',
+  "Here it is again, in case it's useful:",
+  'To recap:',
+] as const;
+
+/**
+ * Every reply, just before it is sent.
+ *
+ *   swearing     a genuine question with a swear word in it is answered, after
+ *                a light request to keep it friendly
+ *   repetition   a reply identical to the previous one is introduced as a
+ *                recap, instead of looking like the assistant is stuck
+ *   em dashes    none reach a customer, whatever the catalogue text contains
+ */
+function finish(m: Memory, decision: Decision): Decision {
+  if (decision.tools.length > 0 || !decision.text) return decision;
+  const v = voice(m);
+  let text = decision.text;
+
+  if (m.latest.profane && m.intent !== 'abuse') {
+    text = `${v.pick('friendly', KEEP_IT_FRIENDLY)} ${withoutOpener(text)}`;
+  }
+
+  if (m.asked && core(text) === core(m.asked)) {
+    text = paragraphs(v.pick('recap', RECAP), text);
+  }
+
+  // A salam expects its reply, even when the same message also asked for a
+  // test drive. The greeting reply already returns it.
+  if (m.latest.salam && m.intent !== 'greeting' && !text.startsWith('Waalaikumsalam')) {
+    text = `Waalaikumsalam! ${text}`;
+  }
+
+  text = text.replace(/\s*—\s*/g, ', ').replace(/–/g, ' to ');
+  return { ...decision, text };
+}
+
+/** A reply without its opening courtesy, for comparing two replies' substance. */
+function withoutOpener(text: string): string {
+  const opener = OPENERS.find((o) => text.startsWith(`${o} `));
+  return opener ? text.slice(opener.length + 1) : text;
+}
+
+function core(text: string): string {
+  const recap = RECAP.find((r) => text.startsWith(r));
+  return withoutOpener(recap ? text.slice(recap.length) : text)
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /* -------------------------------------------------------------------------- */
 /* Opening move                                                               */
 /* -------------------------------------------------------------------------- */
 
-function openTurn(m: Memory, digest: Digest, now: Date): Decision {
+function openTurn(turn: Turn): Decision {
+  const { m, digest, now } = turn;
+  const v = voice(m);
+
+  // Before anything is looked up: messages that must not be answered as they
+  // were asked.
+  switch (m.intent) {
+    case 'abuse':
+      return say(abuseReply(m));
+    case 'injection':
+      return say(
+        v.pick('injection', [
+          "I'm here to help with our cars and the dealership, so I'll stick to that. What would you like to know?",
+          "That's not something I can help with, but I'm very happy to talk about the range, prices or booking a drive.",
+        ]),
+      );
+    case 'privacy':
+      return say(
+        v.pick('privacy', [
+          "I'm afraid I can't share anything about other customers, and I look after your details in exactly the same way. Is there anything about our cars I can help you with?",
+          "I can't discuss other customers, sorry. Their details stay private, just as yours do. What can I help you with?",
+        ]),
+      );
+    default:
+      break;
+  }
+
   // Asked about a car we do not build, say so and name what we do. The spec is
   // explicit about this (§"What you may state as fact"), and it is a far better
   // answer than "I do not have that confirmed" — which is true, but leaves the
   // customer wondering whether the Z9 exists and we are simply unsure.
-  const v = voiceFor(m.seed);
-
-  const invented = inventedModel(m, digest);
+  const invented = m.intent === 'competitor' ? undefined : inventedModel(m, digest);
   if (invented) {
     return say(
-      `${v.pick('invented', [
-        `We don't make ${article(invented)} ${invented}, I'm afraid.`,
-        `There's no ${invented} in our range, sorry.`,
-        `We don't build ${article(invented)} ${invented}.`,
-      ])} ` +
-        `Here is everything ${digest.brandName} does make:\n\n${range(digest)}`,
+      paragraphs(
+        sentences(
+          v.pick('invented', [
+            `We don't make ${article(invented)} ${invented}, I'm afraid.`,
+            `There's no ${invented} in our range, sorry.`,
+            `We don't build ${article(invented)} ${invented}.`,
+          ]),
+          `Here's everything ${digest.brandName} does make:`,
+        ),
+        range(digest),
+        v.pick('invented:next', ['Any of those catch your eye?', 'Shall I tell you about one of them?']),
+      ),
     );
   }
 
   switch (m.intent) {
+    // --- The conversation itself -------------------------------------------
     case 'greeting':
+      return say(greeting(turn));
+
+    case 'how_are_you':
       return say(
-        v.pick('greeting', [
-          `Hello, and welcome to ${digest.brandName}. I can talk you through the range, ` +
-            "work out prices and finance, tell you what's on the ground today, or get " +
-            'you booked in for a drive. What would be most useful?',
-          `Hi there. I'm here to help with anything ${digest.brandName}: what we build, ` +
-            "what it costs, what's in stock, or booking you a test drive. Where shall we start?",
-          `Welcome to ${digest.brandName}. Ask me about any of the cars, prices, finance, ` +
-            'or what we have here right now. I can also book you a drive whenever you like. ' +
-            'What are you after?',
-        ]),
+        sentences(
+          v.pick('howareyou', [
+            "I'm doing well, thank you for asking!",
+            "All good here, thanks for asking!",
+            "Very well, thank you!",
+          ]),
+          v.pick('howareyou:next', [
+            'How can I help you today?',
+            'What can I help you with?',
+            'Are you looking at anything in particular?',
+          ]),
+        ),
+      );
+
+    case 'who_are_you':
+      // Honest, always. Sounding human is the aim; claiming to be one is not.
+      return say(
+        paragraphs(
+          v.pick('whoami', [
+            `I'm ${digest.brandName}'s virtual assistant. I can answer questions about any of our cars, check what's in stock, work out finance and book you a test drive, any time of day.`,
+            `I'm the ${digest.brandName} virtual assistant, here around the clock for questions about the range, prices, stock and test drives.`,
+          ]),
+          v.pick('whoami:human', [
+            "If you'd rather speak to a person, just say and I'll bring in one of the team.",
+            'And whenever you want a real person, say the word and I will get one of the team to pick it up.',
+          ]),
+        ),
       );
 
     case 'thanks':
       return say(
         sentences(
-          v.pick('thanks', ['Any time.', "You're very welcome.", 'My pleasure.', 'No trouble at all.']),
+          v.pick('thanks', ["You're very welcome!", 'My pleasure.', 'Any time.', 'No trouble at all.', 'Glad I could help.']),
           v.pick('thanks:more', ANYTHING_ELSE),
         ),
       );
 
+    case 'goodbye':
+      return say(
+        v.pick('bye', [
+          `Thanks for chatting with ${digest.brandName}! If anything else comes up, just send a message. Have a lovely day.`,
+          'It was a pleasure. Whenever you have another question, I am here. Take care!',
+          "Thanks for stopping by! I'm here whenever you need me. Have a great day.",
+        ]),
+      );
+
+    case 'acknowledge':
+      return say(
+        sentences(
+          v.pick('ack', ['Glad that helps.', 'Great.', 'Perfect.', 'Lovely.', 'Brilliant.']),
+          m.modelSlug && v.sometimes('ack:car', 2)
+            ? `Anything else you'd like to know about the ${modelShortName(m, digest)}?`
+            : v.pick('ack:more', ANYTHING_ELSE),
+        ),
+      );
+
+    case 'compliment':
+      return say(
+        sentences(
+          v.pick('compliment', ["That's very kind of you, thank you!", 'Thank you, that is lovely to hear!', 'Thanks so much!']),
+          m.latest.modelSlugs.length
+            ? v.pick('compliment:drive', OFFER_DRIVE)
+            : v.pick('compliment:more', ANYTHING_ELSE),
+        ),
+      );
+
+    case 'language':
+      return say(
+        v.pick('language', [
+          "I work best in English, but I understand a fair bit of everyday Malay too, so ask whichever way is easiest and I'll reply in English.",
+          "I reply in English, though I understand common Malay as well. Ask away!",
+        ]),
+      );
+
+    case 'complaint':
+      return complaintTurn(m);
+
+    // --- The dealership -------------------------------------------------------
     case 'hours':
       return call(t('getDealershipHours', {}));
 
     case 'location':
+    case 'about_company':
+    case 'careers':
       return call(t('getDealershipInformation', {}));
 
+    // --- Finding a car ----------------------------------------------------------
     case 'search_vehicles':
       return call(t('searchVehicles', searchInput(m)));
 
     case 'compare':
       return m.comparisonSlugs.length >= 2
         ? call(t('compareVehicles', { modelSlugs: m.comparisonSlugs.slice(0, 3) }))
-        : say(`${v.pick('compare', ['Happy to. Which two should I put side by side?', 'Sure, which two shall I compare?', "Of course. Which pair did you want to look at?"])}\n\n${range(digest)}`);
+        : say(
+            paragraphs(
+              v.pick('compare', [
+                'Happy to. Which two should I put side by side?',
+                'Sure thing. Which two shall I compare?',
+                'Of course. Which pair did you want to look at?',
+              ]),
+              range(digest),
+            ),
+          );
 
     case 'range':
       return say(
-        `${v.pick('range:lead', [
-          `Here's the whole ${digest.brandName} range:`,
-          `This is everything we build:`,
-          `The full range:`,
-        ])}\n\n${range(digest)}\n\n${v.pick('range:next', [
-          'Say which one catches your eye and I can go into it.',
-          "Point me at one and I'll tell you more.",
-          "Which of those should I open up?",
-        ])}`,
+        paragraphs(
+          sentences(
+            v.pick('range:opener', ['Absolutely.', 'Of course.', 'Sure thing.']),
+            v.pick('range:lead', [
+              `Here's the whole ${digest.brandName} range:`,
+              `This is everything we build:`,
+              `Here's the full line-up:`,
+            ]),
+          ),
+          range(digest),
+          v.pick('range:next', [
+            'Say which one catches your eye and I can go into it.',
+            "Point me at one and I'll tell you more.",
+            'Which of those should I open up for you?',
+          ]),
+        ),
       );
 
     // A superlative with a measure behind it. The criterion is always set when
@@ -146,7 +376,7 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
         ? call(
             t('rankModels', {
               criterion: m.rankCriterion,
-              ...(m.bodyStyle ? { bodyStyle: m.bodyStyle } : {}),
+              ...(m.latest.bodyStyle && !m.latest.family ? { bodyStyle: m.latest.bodyStyle } : {}),
             }),
           )
         : say(recommendReply(m, digest));
@@ -155,38 +385,43 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
       return m.modelSlug
         ? call(t('rankTrims', { modelSlug: m.modelSlug }))
         : say(
-            `${v.pick('value:which', [
-              'Worth comparing properly.',
-              'Good question. The steps are not all the same value.',
-              'That varies by car.',
-            ])} ${ask(m, 'model')}\n\n${range(digest)}`,
+            paragraphs(
+              sentences(
+                v.pick('value:which', [
+                  'Good question, and it varies from car to car.',
+                  'Worth comparing properly, because the steps are not all the same value.',
+                ]),
+                ask(m, 'model'),
+              ),
+              range(digest),
+            ),
           );
 
     case 'recommend':
       return say(recommendReply(m, digest));
 
-    case 'delivery':
-      return deliveryTurn(m, digest);
-
-    case 'specs':
-      return specsTurn(m, digest);
+    case 'competitor':
+      return competitorTurn(m, digest);
 
     // A shape we do not build. Told plainly, with what we DO build underneath
     // it, which is the same courtesy the invented-model branch extends: the
     // customer learns the answer and their next question at the same time.
     case 'body_not_built':
       return say(
-        `${v.pick('unbuilt', [
-          `We don't build ${articleFor(m.unbuiltBody!)} ${m.unbuiltBody}, I'm afraid.`,
-          `No ${m.unbuiltBody} in the range, sorry.`,
-          `${digest.brandName} doesn't make ${articleFor(m.unbuiltBody!)} ${m.unbuiltBody}.`,
-        ])} ${v.pick('unbuilt:next', [
-          'Here is everything we do build:',
-          'This is what we do make:',
-          'What we do build:',
-        ])}\n\n${range(digest)}`,
+        paragraphs(
+          sentences(
+            v.pick('unbuilt', [
+              `We don't build ${articleFor(m.unbuiltBody!)} ${m.unbuiltBody}, I'm afraid.`,
+              `No ${m.unbuiltBody} in the range, sorry.`,
+              `${digest.brandName} doesn't make ${articleFor(m.unbuiltBody!)} ${m.unbuiltBody}.`,
+            ]),
+            v.pick('unbuilt:next', ['Here is everything we do build:', 'This is what we do make:', 'Here is what we do build:']),
+          ),
+          range(digest),
+        ),
       );
 
+    // --- One car, one aspect ----------------------------------------------------
     case 'vehicle_overview':
     case 'price':
     case 'powertrains':
@@ -198,6 +433,43 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
     case 'finance':
       return catalogueTurn(m, digest);
 
+    case 'feature_check':
+      return featureCheckTurn(m, digest);
+
+    case 'transmission':
+      return m.modelSlug
+        ? call(t('getVehiclePowertrains', { modelSlug: m.modelSlug }))
+        : say(paragraphs(`${ask(m, 'model')} I'll tell you what gearbox it has.`, range(digest)));
+
+    case 'charging':
+      return m.modelSlug
+        ? call(t('getVehiclePowertrains', { modelSlug: m.modelSlug }))
+        : call(t('searchVehicles', { powertrainKind: 'bev' }));
+
+    case 'delivery':
+      return m.modelSlug
+        ? call(t('checkInventory', { modelSlug: m.modelSlug }))
+        : say(paragraphs(`${ask(m, 'model')} I'll check what's ready now.`, range(digest)));
+
+    case 'specs':
+      return m.modelSlug
+        ? call(t('getVehicle', { modelSlug: m.modelSlug }))
+        : say(paragraphs(ask(m, 'model'), range(digest)));
+
+    // --- Buying one ---------------------------------------------------------------
+    case 'payment':
+    case 'promotions':
+    case 'insurance':
+    case 'registration':
+    case 'warranty':
+    case 'used_cars':
+    case 'home_delivery':
+      return say(teamTopic(m, m.intent));
+
+    case 'purchase':
+      return purchaseTurn(m, digest);
+
+    // --- Coming in ----------------------------------------------------------------
     case 'test_drive':
       return call(slotsCall(m, digest, now));
 
@@ -219,6 +491,39 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
     case 'service':
       return serviceTurn(m);
 
+    // --- Replies to the assistant's own offers ------------------------------------
+    case 'more':
+      return moreTurn(m);
+
+    case 'declined':
+      return say(
+        sentences(
+          v.pick('declined', ['No problem at all.', 'Not a problem.', "That's absolutely fine.", 'Of course, no pressure at all.']),
+          v.pick('declined:more', [
+            "If anything else comes up, I'm right here.",
+            'Anything else I can help with?',
+            'Just shout if you think of anything else.',
+          ]),
+        ),
+      );
+
+    case 'consent_declined':
+      return say(
+        sentences(
+          v.pick('consent:no', ['No problem at all.', "That's completely fine."]),
+          "I won't pass your details on. I do need that to book anything in for you, so if you change your mind just let me know, or feel free to pop into the showroom whenever suits.",
+        ),
+      );
+
+    case 'declined_time':
+      return say(
+        sentences(
+          v.pick('time:no', ['No problem.', "That's fine."]),
+          'The team can usually find something that suits.',
+          v.pick('time:human', OFFER_HUMAN),
+        ),
+      );
+
     default:
       // Never a bare shrug. If THIS message named a car, we know a great deal
       // about it, and leading with that is a real answer to someone plainly
@@ -228,74 +533,236 @@ function openTurn(m: Memory, digest: Digest, now: Date): Decision {
       // the conversation, which is right for "and what colours does it come
       // in?" and catastrophic here: once somebody had mentioned the S5, every
       // message this branch could not parse replied with the S5 overview.
-      // Four questions about other cars in a row got the same paragraph, and
-      // so did "Dude". A remembered slug is not what an unrecognised sentence
-      // is about.
       return m.latest.modelSlugs.length === 1
         ? call(t('getVehicle', { modelSlug: m.latest.modelSlugs[0]! }))
-        : say(cannotHelp(m));
+        : say(cannotHelp(m, digest));
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Conversation replies                                                        */
+/* -------------------------------------------------------------------------- */
+
 /**
- * A measurement we do not hold.
+ * Hello, in the dealership's own time of day.
  *
- * Boot volumes, kerb weights, tow ratings and 0–60 times are not in this
- * catalogue, and there is no version of this assistant that should produce
- * one. What it should never do is make that the customer's problem.
- *
- * So the reply is the car — what it is, what it costs, what it is built in,
- * all of it true — and then the specific figure routed to somebody who has the
- * brochure open. The customer gets information and a route to the rest of it,
- * which is what they would get from a salesperson who had to go and look.
+ * "Good evening" at 9pm is a small thing that reads as somebody being there. A
+ * salam is returned, because it is a greeting that expects its reply. And a
+ * customer we already know is welcomed back by name.
  */
-function specsTurn(m: Memory, digest: Digest): Decision {
-  if (!m.modelSlug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
-  return call(t('getVehicle', { modelSlug: m.modelSlug }));
+function greeting(turn: Turn): string {
+  const { m, digest, now } = turn;
+  const v = voice(m);
+
+  const hour = Number(
+    new Intl.DateTimeFormat('en-GB', { timeZone: digest.timezone, hour: '2-digit', hourCycle: 'h23' }).format(now),
+  );
+  const part = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const hello = m.latest.salam
+    ? 'Waalaikumsalam!'
+    : v.pick('hello', [`${part}!`, 'Hello!', 'Hi there!', `${part}, and welcome!`]);
+  const name = m.name ? ` ${firstName(m.name)}` : '';
+
+  return sentences(
+    name ? `${hello.replace(/!$/, '')},${name}!` : hello,
+    v.pick('welcome', [
+      `Welcome to ${digest.brandName}. I can talk you through any of our cars, prices and finance, what's in stock today, or book you a test drive.`,
+      `Thanks for getting in touch with ${digest.brandName}. Ask me anything about the range, what things cost, what we have in stock, or booking a drive.`,
+      `You're through to ${digest.brandName}. I'm here to help with the cars, prices, finance, stock and test drives.`,
+    ]),
+    v.pick('welcome:ask', ['What can I help you with today?', 'What are you looking for?', 'Where would you like to start?']),
+  );
+}
+
+function abuseReply(m: Memory): string {
+  const v = voice(m);
+  if (m.latest.slur) {
+    return v.pick('slur', [
+      "I'm not able to continue with language like that. If there's anything about our cars or the dealership I can help with, I'm here.",
+      "That's not language I can engage with. If you'd like help with a car, a price or a test drive, I'm happy to help.",
+    ]);
+  }
+  if (m.abuseCount >= 3) {
+    return v.pick('abuse:last', [
+      "I'll leave it there for now. Whenever you'd like help with a car, just send a message and I'll be glad to help.",
+      "Let's pick this up another time. When you're ready to talk cars, I'll be here.",
+    ]);
+  }
+  return v.pick('abuse', [
+    "I'd appreciate it if we could keep things friendly. I'm happy to help with anything about our cars, prices or booking a test drive.",
+    "Let's keep it respectful, please. Is there anything about our cars I can help you with?",
+    "I'm here to help, so let's keep it polite. What would you like to know about the range?",
+  ]);
 }
 
 /**
  * "What should I buy?"
  *
  * Answered with a question, which is what a good salesperson does. The range
- * is four or five cars and the customer has told us nothing; listing all of
- * them with every figure attached is not help, it is a brochure, and it is
- * exactly the wall of text this assistant used to open with.
+ * is several cars and the customer has told us nothing; listing all of them
+ * with every figure attached is not help, it is a brochure.
  *
  * One question, with the possible answers named in it, so it takes a single
  * word to reply to. The answer is read back as a ranking criterion, so
  * "running costs" produces a real ordering of real figures on the next turn.
  */
 function recommendReply(m: Memory, digest: Digest): string {
-  const v = voiceFor(m.seed);
+  const v = voice(m);
   return sentences(
     v.pick('rec:lead', [
       'Happy to help you narrow it down.',
-      "I can help with that.",
-      'Let me point you at the right one.',
+      'I can definitely help with that.',
+      "Let's find the right one for you.",
     ]),
-    `There are ${digest.models.length} in the range.`,
+    `There are ${count(digest.models.length)} in the range.`,
     ask(m, 'priority'),
   );
 }
 
-/**
- * How soon they can have one.
- *
- * Two different answers, and only one of them is ours to give. A car on the
- * ground has a date; a factory order does not, because build slots and
- * shipping are not in any catalogue here. So this answers the half it can from
- * stock and is explicit that the other half needs a person, rather than
- * producing a confident "six to eight weeks" out of nowhere.
- */
-function deliveryTurn(m: Memory, digest: Digest): Decision {
-  if (!m.modelSlug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
-  return call(t('checkInventory', { modelSlug: m.modelSlug }));
+function competitorTurn(m: Memory, digest: Digest): Decision {
+  // Our own car, if they named one: the comparison they want is not ours to
+  // make, but what OUR car offers is, and it is the useful half.
+  if (m.latest.modelSlugs.length > 0) {
+    return call(t('getVehicle', { modelSlug: m.latest.modelSlugs[0]! }));
+  }
+  const v = voice(m);
+  return say(
+    paragraphs(
+      v.pick('competitor', [
+        `We're a ${digest.brandName} dealership, so I can only speak for our own cars. I won't compare against other brands, but I can tell you everything about ours.`,
+        `I can only speak for ${digest.brandName}, so I'll leave other brands to them! Here's what we build:`,
+      ]),
+      range(digest),
+    ),
+  );
 }
 
-/** Everything that needs to know which car we are talking about. */
+/* -------------------------------------------------------------------------- */
+/* Questions the catalogue does not answer                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Topics that are real, common, and not in any catalogue: warranty terms,
+ * insurance, road tax, current offers, pre-owned stock, delivery, payment
+ * methods.
+ *
+ * Each gets a warm, specific lead-in — never "I don't know" — and a real offer
+ * to put the question to a person, which a "yes" turns into a ticket with the
+ * customer's own words on it.
+ */
+const TOPICS: Record<
+  'payment' | 'promotions' | 'insurance' | 'registration' | 'warranty' | 'used_cars' | 'home_delivery',
+  readonly string[]
+> = {
+  payment: [
+    "You can pay in full or spread the cost with finance, and I can work out a monthly figure for any car right now. For accepted payment methods and deposits, the team will confirm the details.",
+    'Paying in full and paying on finance both work, and I can give you a monthly estimate straight away. The team can confirm which payment methods they take and how deposits work.',
+  ],
+  promotions: [
+    "Offers change from month to month, so the team is the best source for what's running right now.",
+    "Good timing to ask! What's on offer changes regularly, so I'd rather the team told you the current ones than I gave you an out of date one.",
+  ],
+  insurance: [
+    "Insurance depends on you as much as the car, so that one's best handled by the team.",
+    "Insurance isn't something I can quote here, but the team can point you in the right direction.",
+  ],
+  registration: [
+    'Registration and road tax vary a little from car to car, so the team will give you the exact figures.',
+    "Good question. On-the-road costs depend on the car and how it's registered, so the team will confirm them for you.",
+  ],
+  warranty: [
+    "Warranty cover varies by model, so I'd rather the team confirmed the exact terms than gave you a rough version.",
+    'Good question. The exact warranty terms are worth hearing properly, so the team will confirm them for you.',
+  ],
+  used_cars: [
+    "I look after our new range and what's in stock. For pre-owned cars, the team will know what's come in.",
+    "I'm set up for the new range, so for pre-owned cars the team is the one to ask.",
+  ],
+  home_delivery: [
+    'Delivery is something the team arranges when you buy, depending on where you are.',
+    "We can certainly talk about getting the car to you. The team sorts out the details when you buy.",
+  ],
+};
+
+/** One explanation and one offer: the team is mentioned once, not three times. */
+function teamTopic(m: Memory, topic: keyof typeof TOPICS): string {
+  const v = voice(m);
+  return sentences(v.pick(`topic:${topic}`, TOPICS[topic]), v.pick('topic:offer', TEAM_OFFER_TAILS));
+}
+
+/**
+ * An offer to put the question to somebody who can answer it.
+ *
+ * Deliberately built on one of the GET_IT_RIGHT lines and one of the team
+ * offer tails, because that is how the next turn recognises a "yes please" as
+ * accepting THIS offer. The wording is a promise the code keeps: say yes and a
+ * ticket is raised with the question on it.
+ */
+function offerToAsk(m: Memory, about: string, hedge = true): string {
+  const v = voice(m);
+  return sentences(
+    hedge ? v.pick('offer:lead', GET_IT_RIGHT) : '',
+    `${about}, ${v.pick('offer:team', OFFER_TEAM)}.`,
+    v.pick('offer:ask', TEAM_OFFER_TAILS),
+  );
+}
+
+/**
+ * The reply when nothing else fits.
+ *
+ * What it must never be is a dead end: a customer who gets "I don't know" and
+ * nothing else closes the window, and the dealership never learns they were
+ * there. So it says what it CAN do, concretely, and offers a person.
+ *
+ * And it must never be a loop. The second miss in a row asks them to put it
+ * another way, with examples; the third stops guessing and offers someone from
+ * the team, because by then the kindest thing is a human.
+ */
+function cannotHelp(m: Memory, digest: Digest): string {
+  const v = voice(m);
+  // Examples in this dealership's own words: the first two cars it builds.
+  const [first, second] = digest.models.map((model) => shortModel(model.name));
+  const unsure = v.pick('unsure', UNSURE);
+
+  if (m.unsureStreak >= 2) {
+    return sentences(
+      unsure,
+      "I don't want to keep you going round in circles.",
+      v.pick('unsure:human', OFFER_HUMAN),
+    );
+  }
+
+  if (m.unsureStreak === 1) {
+    return paragraphs(
+      sentences(unsure, 'Could you try putting it another way? For example:'),
+      [
+        first ? `- "How much is the ${first}?"` : '- "What cars do you have?"',
+        `- "What colours does the ${second ?? first ?? 'car'} come in?"`,
+        '- "Can I book a test drive on Saturday?"',
+      ].join('\n'),
+      sentences(`Or, if it's something else, ${v.pick('cannot:team', OFFER_TEAM)}.`, v.pick('cannot:offer', TEAM_OFFER_TAILS)),
+    );
+  }
+
+  return paragraphs(
+    sentences(unsure, v.pick('cannot:can', ["Here's what I can help with:", 'These are the things I can help with straight away:'])),
+    [
+      '- Prices, trims, engines and colours for any model',
+      "- What's in stock right now",
+      '- Finance estimates',
+      '- Booking a test drive',
+      '- Our opening hours and where to find us',
+    ].join('\n'),
+    sentences(`For anything else, ${v.pick('cannot:team', OFFER_TEAM)}.`, v.pick('cannot:offer', TEAM_OFFER_TAILS)),
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Everything that needs to know which car                                     */
+/* -------------------------------------------------------------------------- */
+
 function catalogueTurn(m: Memory, digest: Digest): Decision {
-  if (m.intent === 'finance' && applying(m)) return financeRequestTurn(m, digest);
+  if (m.intent === 'finance' && m.financeApplication) return financeRequestTurn(m, digest);
 
   // "What would $58,900 cost me monthly over 60 months?" needs no car. They
   // have given the figure; asking which model they meant is asking for
@@ -310,7 +777,7 @@ function catalogueTurn(m: Memory, digest: Digest): Decision {
   }
 
   const slug = m.modelSlug;
-  if (!slug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
+  if (!slug) return say(paragraphs(ask(m, 'model'), range(digest)));
 
   switch (m.intent) {
     case 'powertrains':
@@ -337,18 +804,10 @@ function catalogueTurn(m: Memory, digest: Digest): Decision {
       );
     case 'options':
     case 'features':
-      // Both are per trim and powertrain, so the codes have to be looked up
-      // before they can be asked for. An option standard on one trim is a paid
-      // extra on another; there is no answer without the pair.
-      return call(
-        t('getVehiclePowertrains', { modelSlug: slug }),
-        t('getVehicleTrims', { modelSlug: slug }),
-      );
     case 'price':
-      // Always both lookups. Which trim and engine the customer named can only
-      // be known by comparing their words against what this model is actually
-      // built in, and a price for an unnamed build is the cheapest trim's —
-      // which is a figure the trim tool returns rather than one to assume.
+      // All three are per trim and powertrain, so the codes have to be looked
+      // up before they can be asked for. An option standard on one trim is a
+      // paid extra on another; there is no answer without the pair.
       return call(
         t('getVehiclePowertrains', { modelSlug: slug }),
         t('getVehicleTrims', { modelSlug: slug }),
@@ -365,32 +824,143 @@ function catalogueTurn(m: Memory, digest: Digest): Decision {
   }
 }
 
+/**
+ * "Does it have heated seats?" needs the build first — equipment is per trim
+ * and engine — and then both the standard list and the options list, because
+ * the honest answer might be "yes, as an option".
+ */
+function featureCheckTurn(m: Memory, digest: Digest): Decision {
+  if (!m.modelSlug) {
+    // A third row with no car named is a family-sized question, and the SUVs
+    // are where the room is.
+    if (m.featureTerms.includes('third row')) return call(t('searchVehicles', { bodyStyle: 'suv' }));
+    return say(
+      paragraphs(
+        `${ask(m, 'model')} I'll check whether it has ${sentenceList(m.featureTerms.map(featureName), 'or')}.`,
+        range(digest),
+      ),
+    );
+  }
+  return call(
+    t('getVehiclePowertrains', { modelSlug: m.modelSlug }),
+    t('getVehicleTrims', { modelSlug: m.modelSlug }),
+  );
+}
+
+function featureName(term: string): string {
+  const names: Record<string, string> = {
+    carplay: 'Apple CarPlay',
+    'android auto': 'Android Auto',
+    'head-up display': 'a head-up display',
+    'third row': 'a third row of seats',
+    towing: 'a tow bar',
+    camera: 'a camera',
+    display: 'a touchscreen',
+  };
+  return names[term] ?? term;
+}
+
 function searchInput(m: Memory): Record<string, unknown> {
   return {
     ...(m.bodyStyle ? { bodyStyle: m.bodyStyle } : {}),
     ...(m.budgetCents ? { maxPriceCents: m.budgetCents } : {}),
-    ...(m.electric ? { powertrainKind: 'bev' } : {}),
+    ...(m.electric ? { powertrainKind: 'bev' } : m.hybrid ? { powertrainKind: 'hybrid' } : {}),
     ...(m.awd ? { drivetrain: 'awd' } : {}),
   };
 }
 
+/**
+ * The diary window to ask for.
+ *
+ * The day the customer named, if they named one — "this weekend", "tomorrow",
+ * "Saturday" — so the times offered are the times they asked about. Otherwise
+ * the window the previous turn used, so that the slot somebody picked from a
+ * list is still in the list when their name and number arrive and it is
+ * booked. Otherwise the next fortnight.
+ */
 function slotsCall(m: Memory, digest: Digest, now: Date): ToolCall {
+  const named = requestedWindow(m.said.at(-1) ?? '', now, digest.timezone);
+  const previous = m.previousCalls.find((c) => c.name === 'getAvailableTestDriveSlots');
+  const window =
+    named ??
+    (previous && typeof previous.input.fromDate === 'string' && typeof previous.input.toDate === 'string'
+      ? { fromDate: previous.input.fromDate, toDate: previous.input.toDate }
+      : { fromDate: localDate(now, digest.timezone), toDate: localDate(now, digest.timezone, 14) });
+
   return t('getAvailableTestDriveSlots', {
     ...(m.modelSlug ? { modelSlug: m.modelSlug } : {}),
-    fromDate: localDate(now, digest.timezone),
-    toDate: localDate(now, digest.timezone, 14),
+    ...window,
   });
+}
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+function requestedWindow(
+  said: string,
+  now: Date,
+  timezone: string,
+): { fromDate: string; toDate: string } | undefined {
+  const lower = said.toLowerCase();
+  const today = WEEKDAYS.indexOf(
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'long' }).format(now).toLowerCase(),
+  );
+  const day = (offset: number) => localDate(now, timezone, offset);
+  const until = (weekday: number) => (weekday - today + 7) % 7;
+
+  if (/\b(today|tonight|later today)\b/.test(lower)) return { fromDate: day(0), toDate: day(0) };
+  if (/\b(tomorrow|tmrw|tmr|esok)\b/.test(lower)) return { fromDate: day(1), toDate: day(1) };
+  if (/\b(weekend|wkend)\b/.test(lower)) {
+    const saturday = today === 0 ? -1 : until(6);
+    return { fromDate: day(Math.max(0, saturday)), toDate: day(saturday + 1) };
+  }
+  if (/\bnext week\b/.test(lower)) {
+    const monday = until(1) || 7;
+    return { fromDate: day(monday), toDate: day(monday + 6) };
+  }
+  const named = WEEKDAYS.findIndex((name) => new RegExp(`\\b${name}\\b`).test(lower));
+  if (named >= 0) return { fromDate: day(until(named)), toDate: day(until(named)) };
+  return undefined;
+}
+
+/** Read tools a "show me all of them" may re-run. Never a write. */
+const REREADABLE = new Set([
+  'searchVehicles', 'getVehicleTrims', 'getVehicleColours', 'getVehiclePowertrains',
+  'getVehicleOptions', 'getVehicleFeatures', 'rankModels', 'rankTrims', 'checkInventory', 'compareVehicles',
+]);
+
+/**
+ * "Yes, show me the rest."
+ *
+ * The previous turn's lookups are run again rather than remembered, so the
+ * full list is as current as the short one was — and only reads are ever
+ * re-run, so accepting this offer can never repeat a booking.
+ */
+function moreTurn(m: Memory): Decision {
+  const reads = m.previousCalls.filter((c) => REREADABLE.has(c.name));
+  if (reads.length === 0) {
+    return say(`${voice(m).pick('more:which', ['Which list would you like in full?', 'Sure, which would you like to see all of?'])}`);
+  }
+  return call(...reads.map((c) => t(c.name, c.input)));
 }
 
 /* -------------------------------------------------------------------------- */
 /* Continuing a turn, once tools have returned                                */
 /* -------------------------------------------------------------------------- */
 
-function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
+function continueTurn(turn: Turn, steps: Step[]): Decision {
+  const { m, digest } = turn;
+
   // A failed tool ends the turn. Carrying on would mean pricing a build from a
   // list that never arrived.
   const failed = steps.find((step) => step.isError);
-  if (failed) return say(describe(failed, m.seed));
+  if (failed) return say(describe(failed, context(turn)));
+
+  // The full version of a list the previous reply cut short. Nothing to work
+  // out: show the last lookup, all of it.
+  if (m.intent === 'more') {
+    const last = steps.at(-1)!;
+    return say(paragraphs(voice(m).pick('more:lead', ["Here's the full list:", 'Here they all are:', 'Of course, here is everything:']), describe(last, { ...context(turn), expanded: true })));
+  }
 
   const done = new Set(steps.map((step) => step.name));
 
@@ -404,7 +974,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
     // Only worth widening when something other than the price was asked for.
     // Dropping the budget from a budget-only search returns the whole range,
     // which is not "the closest we build" — it is a change of subject.
-    (m.bodyStyle || m.latest.electric || m.latest.awd) &&
+    (m.bodyStyle || m.latest.electric || m.latest.awd || m.latest.hybrid) &&
     steps.length === 1 &&
     steps[0]!.name === 'searchVehicles' &&
     foundNothing(steps[0]!)
@@ -417,7 +987,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
   // Stock: the trim and colour lists came back, so the customer's words can be
   // turned into real codes and the query can filter on them.
   if (m.intent === 'stock' && done.has('getVehicleTrims') && !done.has('checkInventory')) {
-    if (!m.modelSlug) return say(compose(m, steps));
+    if (!m.modelSlug) return say(compose(turn, steps));
 
     const trim = resolveTrim(m.words, rowsOf<TrimRow>(steps, 'getVehicleTrims', 'trims'));
     const colour = resolveColour(m.colourWords, rowsOf<ColourRow>(steps, 'getVehicleColours', 'colours'));
@@ -426,8 +996,10 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
     // it would report "none available", which is true and misleading.
     if (m.colourWords.length > 0 && !colour) {
       return say(
-        `We do not offer ${aColour(m.colourWords[0]!)} on that one. ` +
-          `${describe(steps.find((step) => step.name === 'getVehicleColours')!, m.seed)}`,
+        paragraphs(
+          `We don't offer ${aColour(m.colourWords[0]!)} on the ${modelShortName(m, digest)}, I'm afraid.`,
+          describe(steps.find((step) => step.name === 'getVehicleColours')!, context(turn)),
+        ),
       );
     }
 
@@ -451,11 +1023,14 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
 
     if (build.kind === 'not-offered') {
       const offered = build.alternatives.length
-        ? `The ${build.trim.name} comes with the ${sentenceList(build.alternatives)}.`
-        : 'I do not have another engine listed for that trim.';
+        ? `The ${build.trim.name} comes with the ${sentenceList(build.alternatives, 'or')}.`
+        : "I don't have another engine listed for that trim.";
       return say(
-        `The ${build.powertrain.name} is not offered on the ${build.trim.name}. ${offered} ` +
-          'Say which you would like and I will price it.',
+        sentences(
+          `The ${build.powertrain.name} isn't offered on the ${build.trim.name}, I'm afraid.`,
+          offered,
+          "Tell me which you'd like and I'll price it for you.",
+        ),
       );
     }
 
@@ -467,6 +1042,29 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
       };
       if (m.intent === 'options') return call(t('getVehicleOptions', input));
       if (m.intent === 'features') return call(t('getVehicleFeatures', input));
+      if (m.intent === 'feature_check') {
+        // Equipment differs by trim, so "does it have heated seats?" is
+        // answered for every trim — "standard on the Premium and Luxury" is the
+        // true answer, and checking only the cheapest would have said "no".
+        const trims = rowsOf<TrimRow>(steps, 'getVehicleTrims', 'trims');
+        const powertrains = rowsOf<PowertrainRow>(steps, 'getVehiclePowertrains', 'powertrains');
+        const named = resolveTrim(m.words, trims);
+        const targets = (named ? [named] : trims)
+          .map((trim) => ({
+            trim,
+            powertrain:
+              named && build.named
+                ? build.powertrainCode
+                : powertrains.find((row) => row.offeredWithTrims.includes(trim.code))?.code,
+          }))
+          .filter((target): target is { trim: TrimRow; powertrain: string } => Boolean(target.powertrain));
+        return call(
+          ...targets.flatMap(({ trim, powertrain }) => {
+            const build = { modelSlug: m.modelSlug!, powertrainCode: powertrain, trimCode: trim.code };
+            return [t('getVehicleFeatures', build), t('getVehicleOptions', build)];
+          }),
+        );
+      }
       // A build is only priced when the customer actually named part of it.
       // "How much is the S5?" is asking where the range starts, and the trim
       // list already carries that figure.
@@ -481,15 +1079,20 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
           steps, 'getVehicleTrims', 'trims',
         );
         const from = trims[0]?.priceFrom?.formatted;
-        const name = digest.models.find((model) => model.slug === m.modelSlug)?.name ?? 'It';
+        const v = voice(m);
         return say(
-          [
-            from ? `The ${name} starts at ${from}.` : '',
-            describe(steps.find((step) => step.name === 'getVehicleTrims')!, m.seed),
-            'Tell me which trim and engine you are interested in and I will price it exactly.',
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
+          paragraphs(
+            sentences(
+              opener(m, v),
+              from ? `The ${modelShortName(m, digest)} starts at **${from}**.` : '',
+            ),
+            describe(steps.find((step) => step.name === 'getVehicleTrims')!, context(turn)),
+            v.pick('price:next', [
+              "Tell me which trim and engine you're interested in and I'll price it exactly.",
+              "If you've got a trim and engine in mind, I can give you the exact figure.",
+              'Want me to price up a particular version for you?',
+            ]),
+          ),
         );
       }
     }
@@ -501,7 +1104,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
   // is told nothing happened when it did.
   if (m.intent === 'finance' && done.has('getVehicle') && !done.has('createFinancingRequest')) {
     const cents = startingPriceCents(steps);
-    if (cents && applying(m) && m.name && m.email && m.consent) {
+    if (cents && m.financeApplication && m.name && m.email && m.consent) {
       return call(
         t('createFinancingRequest', {
           ...contactInput(m),
@@ -518,10 +1121,10 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
   }
 
   if (done.has('getAvailableTestDriveSlots') && !done.has('createTestDrive')) {
-    return bookingTurn(m, steps);
+    return bookingTurn(turn, steps);
   }
 
-  return say(compose(m, steps));
+  return say(compose(turn, steps));
 }
 
 /**
@@ -537,6 +1140,7 @@ function continueTurn(m: Memory, steps: Step[], digest: Digest): Decision {
 const ANSWERS_TO: Partial<Record<Flow, string>> = {
   vehicle_overview: 'getVehicle',
   specs: 'getVehicle',
+  competitor: 'getVehicle',
   stock: 'checkInventory',
   delivery: 'checkInventory',
   trims: 'getVehicleTrims',
@@ -563,38 +1167,141 @@ const ANSWERS = new Set([
   'createFinancingRequest', 'createSupportTicket', 'requestHumanHandoff',
 ]);
 
-function compose(m: Memory, steps: Step[]): Decision['text'] {
+/** Answers that are good news, and so can open with "Absolutely." */
+const WARM: ReadonlySet<string> = new Set([
+  'getVehiclePowertrains', 'getVehicleTrims', 'getVehicleColours',
+  'getVehicleOptions', 'getVehicleFeatures', 'calculateVehiclePrice', 'compareVehicles',
+  'rankModels', 'rankTrims', 'calculateFinanceEstimate', 'getDealershipHours',
+  'getDealershipInformation', 'searchVehicles',
+]);
+
+/** The words a describe() call needs that only the conversation knows. */
+function context(turn: Turn): DescribeContext {
+  const { m, digest, now } = turn;
+  return {
+    seed: m.seed,
+    avoid: m.asked,
+    modelName: m.modelSlug ? digest.models.find((model) => model.slug === m.modelSlug)?.name : undefined,
+    firstName: m.name ? firstName(m.name) : undefined,
+    email: m.email,
+    phone: m.phone,
+    now,
+    expanded: m.expanded,
+  };
+}
+
+function compose(turn: Turn, steps: Step[]): Decision['text'] {
+  const { m, digest } = turn;
   const last = steps.at(-1);
-  if (!last) return cannotHelp(m);
+  if (!last) return cannotHelp(m, digest);
+  const ctx = context(turn);
+  const v = voice(m);
+
+  // Answers assembled from more than one lookup.
+  if (m.intent === 'feature_check') {
+    const trimNames = new Map(
+      rowsOf<TrimRow>(steps, 'getVehicleTrims', 'trims').map((trim) => [trim.code, trim.name]),
+    );
+    const perTrim = steps
+      .filter((s) => s.name === 'getVehicleFeatures')
+      .map((features) => {
+        const code = String(features.input.trimCode ?? '');
+        return {
+          trimName: trimNames.get(code) ?? code,
+          features,
+          options: steps.find((s) => s.name === 'getVehicleOptions' && s.input.trimCode === code),
+        };
+      });
+    const check = describeFeatureCheck(m.featureTerms, m.latest.words, perTrim, ctx);
+    return paragraphs(
+      check.text,
+      check.found
+        ? v.pick('fc:drive', OFFER_DRIVE)
+        : offerToAsk(m, 'On that specific piece of kit', false),
+    );
+  }
+
+  if (m.intent === 'charging' && last.name === 'getVehiclePowertrains') {
+    const charging = describeCharging(last, ctx);
+    return paragraphs(
+      charging.text,
+      charging.electric
+        ? sentences('Charging times depend on the charger as much as the car.', offerToAsk(m, 'For times at home and on a fast charger', false))
+        : v.pick('charge:more', ANYTHING_ELSE),
+    );
+  }
+
+  if (m.intent === 'transmission' && last.name === 'getVehiclePowertrains') {
+    return paragraphs(describeTransmission(last, ctx), v.pick('trans:more', ANYTHING_ELSE));
+  }
+
+  if (m.intent === 'about_company' && last.name === 'getDealershipInformation') {
+    return aboutCompany(m, digest, describe(last, ctx));
+  }
+
+  if (m.intent === 'careers' && last.name === 'getDealershipInformation') {
+    return paragraphs(
+      "I'm set up for customer enquiries, so I can't help with jobs directly, but the team can point you in the right direction.",
+      describe(last, ctx),
+    );
+  }
 
   const answer = answerStep(m, steps) ?? last;
-  const body = describe(answer, m.seed);
+  const body = describe(answer, ctx);
 
-  const follow = followUp(m, answer);
-  return [preamble(m, answer), body || cannotHelp(m), follow].filter(Boolean).join('\n\n');
+  // A preamble is a caveat — "we don't offer green", "nothing under that
+  // budget" — and nobody says "Absolutely!" in front of bad news.
+  const caveat = preamble(m, answer, digest);
+  const text = body || cannotHelp(m, digest);
+  return paragraphs(
+    caveat ? paragraphs(caveat, text) : inline(warmOpener(m, answer), text),
+    followUp(m, answer),
+  );
 }
 
 /**
  * The one step worth reading out.
  *
  * In order: the tool this intent was asking for, then any tool whose result is
- * an answer in its own right, then whatever ran last. A failed step is never
- * chosen as the answer — the error branch above has already dealt with those,
- * and picking one here would report a lookup failure as the reply to a
- * question a later tool answered perfectly well.
+ * an answer in its own right. LAST matching call, not the first: a turn can
+ * call one tool twice — a budget search that finds nothing is immediately
+ * re-run without the budget — and the second call is the one that answers.
  */
 function answerStep(m: Memory, steps: Step[]): Step | undefined {
   const reversed = [...steps].reverse();
-
-  // LAST matching call, not the first. A turn can call one tool twice — a
-  // budget search that finds nothing is immediately re-run without the budget
-  // — and the second call is the one that answers. Reading the first reported
-  // "nothing matches" while holding a perfectly good list of alternatives.
   const wanted = ANSWERS_TO[m.intent];
   const asked = wanted && reversed.find((step) => step.name === wanted && !step.isError);
   if (asked) return asked;
-
   return reversed.find((step) => ANSWERS.has(step.name) && !step.isError);
+}
+
+/** "Absolutely. The S5 comes in..." — the courtesy on the same line as the answer. */
+function inline(opener: string, text: string): string {
+  if (!opener) return text;
+  const [first, ...rest] = text.split('\n\n');
+  return paragraphs(`${opener} ${first}`, ...rest);
+}
+
+/** "Absolutely." in front of good news, most of the time, never twice running. */
+function opener(m: Memory, v: Voice): string {
+  // The full list already has its own lead line ("Here they all are:").
+  if (m.latest.profane || m.expanded) return '';
+  return v.sometimes('no-opener', 3) ? '' : v.pick('opener', OPENERS);
+}
+
+function warmOpener(m: Memory, answer: Step): string {
+  if (!WARM.has(answer.name) || answer.isError) return '';
+  if (answer.name === 'searchVehicles' && foundNothing(answer)) return '';
+  if (answer.name === 'rankModels' && (answer.result as { enough?: boolean })?.enough === false) return '';
+  // An overview for a question it cannot fully answer opens with the car, not
+  // with "Absolutely": the customer asked something else first.
+  if (answer.name === 'getVehicle' && ['unknown', 'competitor', 'specs'].includes(m.intent)) return '';
+  return opener(m, voice(m));
+}
+
+function foundNothingInStock(step: Step): boolean {
+  const result = (step.result ?? {}) as { available?: unknown[] };
+  return !Array.isArray(result.available) || result.available.length === 0;
 }
 
 function foundNothing(step: Step): boolean {
@@ -603,12 +1310,20 @@ function foundNothing(step: Step): boolean {
 }
 
 /** Said before the answer, where the answer alone would not address the question. */
-function preamble(m: Memory, last: Step): string {
+function preamble(m: Memory, last: Step, digest: Digest): string {
   if (last.name === 'searchVehicles' && m.budgetCents && !foundNothing(last)) {
     const searched = (last.input.maxPriceCents ?? null) === null;
     // The second, wider search. The figure comes from what they said, and the
     // prices below it come from the catalogue.
-    if (searched) return 'Nothing in the range comes in under that. The closest we build:';
+    if (searched) return "Nothing in the range comes in under that, I'm afraid. Here's the closest we build:";
+  }
+
+  if (last.name === 'searchVehicles' && m.family && !m.budgetCents && !foundNothing(last)) {
+    return 'For a family, our SUVs are the natural place to start.';
+  }
+
+  if (last.name === 'searchVehicles' && m.intent === 'charging') {
+    return 'These are the ones you plug in:';
   }
 
   if (last.name === 'getVehicleColours' && !last.isError && m.colourWords.length > 0) {
@@ -617,8 +1332,12 @@ function preamble(m: Memory, last: Step): string {
     // the useful part that follows it. Decided by the palette, not by a
     // hardcoded idea of which colours a dealership sells.
     if (!offered) {
-      return `We do not offer ${aColour(m.colourWords[0]!)} on that one. Here is what we do:`;
+      return `We don't offer ${aColour(m.colourWords[0]!)} on the ${modelShortName(m, digest)}, I'm afraid. Here is what we do:`;
     }
+  }
+
+  if (last.name === 'getVehicle' && m.intent === 'competitor') {
+    return "I can only speak for our own cars, so I won't compare against other brands. Here's what ours brings:";
   }
   return '';
 }
@@ -627,31 +1346,9 @@ function aColour(word: string): string {
   return /^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`;
 }
 
-/**
- * An offer to put the question to somebody who can answer it.
- *
- * Deliberately built on one of the CANNOT_HELP lines, because that is how the
- * next turn recognises a "yes please" as accepting THIS offer rather than
- * agreeing to something else. The wording is a promise the code keeps: say yes
- * and a ticket is raised with the question on it.
- */
-function offerToAsk(m: Memory, about: string): string {
-  const v = voiceFor(m.seed);
-  return sentences(
-    v.pick('offer:lead', CANNOT_HELP),
-    `${about}, ${v.pick('offer:team', OFFER_TEAM)}.`,
-    v.pick('offer:ask', [
-      'Want me to put it to them?',
-      'Shall I ask them for you?',
-      'Shall I get them onto it?',
-      'Want me to have them come back to you with it?',
-    ]),
-  );
-}
-
 /** One next step, offered only where there is an obvious one. */
 function followUp(m: Memory, last: Step): string {
-  const v = voiceFor(m.seed);
+  const v = voice(m);
 
   if (last.name === 'calculateFinanceEstimate') return ask(m, 'finance');
 
@@ -659,13 +1356,11 @@ function followUp(m: Memory, last: Step): string {
     // Two different questions land here. "What's in stock" is answered by the
     // list; "how soon can I have one" is only half answered by it, because a
     // factory order's timing is not in any catalogue and must not be invented.
-    return m.intent === 'delivery'
-      ? offerToAsk(m, 'On build and delivery times for an order')
-      : v.pick('stock:drive', [
-          "Say the word if you'd like to drive one and I'll check the diary.",
-          'Happy to get you behind the wheel of one, just say the word.',
-          'I can book you in to see one whenever suits.',
-        ]);
+    // And nothing on site is a question about what is coming, not a moment to
+    // offer a drive.
+    if (m.intent === 'delivery') return offerToAsk(m, 'On build and delivery times for an order');
+    if (foundNothingInStock(last)) return offerToAsk(m, "On what's arriving and when");
+    return v.pick('stock:drive', OFFER_DRIVE);
   }
 
   if (last.name === 'getVehicle') {
@@ -674,16 +1369,65 @@ function followUp(m: Memory, last: Step): string {
     // route to the figure — never a shrug, and never an invented number.
     if (m.intent === 'specs') return offerToAsk(m, 'On that exact figure');
     if (m.intent === 'unknown') return offerToAsk(m, 'On the specifics you asked about');
+    if (m.intent === 'competitor') return v.pick('competitor:drive', OFFER_DRIVE);
     if (m.intent === 'vehicle_overview') {
-      return v.pick('overview:next', [
-        'I can go into the engines, the trims, the colours or what we have in stock. Just say which.',
-        'Engines, trims, colours, what we have on site. Say which and I\'ll open it up.',
-        'Want the engines, the trims, the colours, or what\'s here right now?',
-      ]);
+      return v.sometimes('overview:drive', 3)
+        ? v.pick('overview:drive', OFFER_DRIVE)
+        : v.pick('overview:next', [
+            'I can go into the engines, the trims, the colours or what we have in stock. Just say which.',
+            "Engines, trims, colours, what's on site: say which and I'll open it up.",
+            "Would you like the engines, the trims, the colours, or what's here right now?",
+          ]);
     }
   }
 
+  if (last.name === 'getDealershipHours' || last.name === 'getDealershipInformation') {
+    return v.sometimes('visit:drive', 2) ? v.pick('visit:drive', OFFER_DRIVE) : v.pick('visit:more', ANYTHING_ELSE);
+  }
+
+  if (last.name === 'searchVehicles' && !foundNothing(last)) {
+    return v.pick('search:next', [
+      'Want me to tell you more about any of them?',
+      'Say which one appeals and I will open it up.',
+      'Any of those worth a closer look?',
+    ]);
+  }
+
+  if (last.name === 'getVehicleTrims' || last.name === 'getVehiclePowertrains' || last.name === 'getVehicleColours') {
+    return v.sometimes(`${last.name}:next`, 2) ? v.pick('aspect:drive', OFFER_DRIVE) : '';
+  }
+
+  if (last.name === 'rankModels' || last.name === 'rankTrims') {
+    return v.sometimes('rank:next', 2) ? v.pick('rank:drive', OFFER_DRIVE) : '';
+  }
+
   return '';
+}
+
+/**
+ * Who we are, from the range and the showroom's own details.
+ *
+ * The range is summarised from the catalogue digest — how many cars, the
+ * smallest to the largest, how many are electric — and the rest comes from
+ * the dealership information the tool returned. No history, no founding date,
+ * no "family-run since": nothing the dealership has not written down.
+ */
+function aboutCompany(m: Memory, digest: Digest, contact: string): string {
+  const v = voice(m);
+  const models = digest.models;
+  const electric = models.filter((model) => /electric/i.test(model.segment)).length;
+  const first = models[0];
+  const lastModel = models.at(-1);
+
+  return paragraphs(
+    sentences(
+      v.pick('about:lead', ['Happy to tell you about us!', "We'd love to tell you about us!"]),
+      `${digest.brandName} builds ${count(models.length)} cars${first && lastModel ? `, from the ${first.name}, our ${softCase(first.segment)}, to the ${lastModel.name}, our ${softCase(lastModel.segment)}` : ''}.`,
+      electric ? `${capitalise(count(electric))} of them ${electric === 1 ? 'is' : 'are'} fully electric.` : '',
+    ),
+    contact,
+    v.pick('about:next', ['What can I help you find?', 'Is there a particular car you are interested in?']),
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -695,16 +1439,36 @@ interface Slot {
   label: string;
 }
 
-function bookingTurn(m: Memory, steps: Step[]): Decision {
+function bookingTurn(turn: Turn, steps: Step[]): Decision {
+  const { m, digest, now } = turn;
   const slots = slotsFrom(steps);
+  const v = voice(m);
+  const lookups = steps.filter((step) => step.name === 'getAvailableTestDriveSlots');
+
+  // Nothing on the day they named — often simply a day we are closed. That is
+  // not "nothing in the next two weeks": widen to the fortnight once, and say
+  // plainly that their day was full before offering the nearest alternatives.
+  const widened = lookups.length > 1;
+  if (slots.length === 0 && !widened) {
+    const input = lookups[0]?.input ?? {};
+    const fortnight = { fromDate: localDate(now, digest.timezone), toDate: localDate(now, digest.timezone, 14) };
+    if (input.fromDate !== fortnight.fromDate || input.toDate !== fortnight.toDate) {
+      return call(
+        t('getAvailableTestDriveSlots', {
+          ...(m.modelSlug ? { modelSlug: m.modelSlug } : {}),
+          ...fortnight,
+        }),
+      );
+    }
+  }
 
   if (slots.length === 0) {
     // Not a dead end: a booking needs a specialist AND a demonstrator free, and
     // when neither is, the enquiry still has to reach a person.
     const missing = askContact(
       m,
-      'There is nothing bookable in the next two weeks. A specialist and a demonstrator ' +
-        'both have to be free. I can ask the team to find you a time.',
+      "I'm sorry, there's nothing free in the next two weeks: a specialist and a demonstrator both have to be available. I can ask the team to find you a time.",
+      { phone: true },
     );
     if (missing) return missing;
 
@@ -717,14 +1481,31 @@ function bookingTurn(m: Memory, steps: Step[]): Decision {
     );
   }
 
-  const narrowed = narrowSlots(slots, m);
+  const narrowed = narrowSlots(slots, m, turn);
   const chosen = narrowed.length === 1 ? narrowed[0]! : undefined;
 
   if (!chosen) {
-    return say(`${offer(narrowed.length > 0 ? narrowed : slots)}\n\n${ask(m, 'time')}`);
+    const model = m.modelSlug ? ` for the ${modelShortName(m, digest)}` : '';
+    return say(
+      paragraphs(
+        widened
+          ? v.pick('slots:widened', [
+              `Nothing's free then, I'm afraid. Here are the nearest times I have${model}:`,
+              `That day's not available, sorry. These are the next free slots${model}:`,
+            ])
+          : narrowed.length > 1
+          ? v.pick('slots:narrowed', [`Here's what's free then${model}:`, `These times work then${model}:`])
+          : v.pick('slots:lead', [
+              `${v.pick('slots:opener', ['Lovely!', 'Brilliant!', 'Great choice!'])} Here are the next available times${model}:`,
+              `Happy to book that in. These are the next free slots${model}:`,
+            ]),
+        offer(narrowed.length > 0 ? narrowed.slice(0, 5) : spread(slots)),
+        ask(m, 'time'),
+      ),
+    );
   }
 
-  const missing = askContact(m, `${chosen.label} works.`);
+  const missing = askContact(m, `${shortLabel(chosen.label)} works perfectly.`, { phone: true });
   if (missing) return missing;
 
   return call(
@@ -737,7 +1518,8 @@ function bookingTurn(m: Memory, steps: Step[]): Decision {
 }
 
 function slotsFrom(steps: Step[]): Slot[] {
-  const step = steps.find((s) => s.name === 'getAvailableTestDriveSlots');
+  // The latest lookup: after a widened search, that is the one with the times.
+  const step = [...steps].reverse().find((s) => s.name === 'getAvailableTestDriveSlots');
   const result = (step?.result ?? {}) as { slots?: unknown };
   return Array.isArray(result.slots)
     ? (result.slots as Slot[]).filter((s) => typeof s?.startsAt === 'string')
@@ -747,8 +1529,45 @@ function slotsFrom(steps: Step[]): Slot[] {
 function offer(slots: Slot[]): string {
   return slots
     .slice(0, 5)
-    .map((slot, index) => `${index + 1}. ${slot.label}`)
+    .map((slot, index) => `${index + 1}. ${shortLabel(slot.label)}`)
     .join('\n');
+}
+
+/**
+ * "Wednesday, September 23 at 9am" rather than "Wednesday, September 23, 2026
+ * at 9:00 a.m. EDT" five times over.
+ *
+ * The year and the zone are right on a confirmation and noise in a list of
+ * choices. Falls back to the full label for any format it does not recognise,
+ * and the slot is always matched back by its full label, so shortening the
+ * words can never change which time is booked.
+ */
+function shortLabel(label: string): string {
+  const match =
+    /^(\w+), (\w+) (\d{1,2}), \d{4} at (\d{1,2}):(\d{2})[\s\u202f\u00a0]*([ap])\.?[\s\u202f\u00a0]?m\.?/i.exec(label);
+  if (!match) return label;
+  const [, weekday, month, day, hour, minute, half] = match;
+  return `${weekday}, ${month} ${day} at ${hour}${minute === '00' ? '' : `:${minute}`}${half!.toLowerCase()}m`;
+}
+
+/**
+ * Up to five times, no more than two on any one day.
+ *
+ * The diary's first five slots are usually one morning, and five choices on a
+ * single Wednesday is not a choice for somebody who works on Wednesdays.
+ */
+function spread(slots: Slot[]): Slot[] {
+  const perDay = new Map<string, number>();
+  const picked: Slot[] = [];
+  for (const slot of slots) {
+    const day = slot.label.split(' at ')[0] ?? slot.label;
+    const used = perDay.get(day) ?? 0;
+    if (used >= 2) continue;
+    perDay.set(day, used + 1);
+    picked.push(slot);
+    if (picked.length === 5) break;
+  }
+  return picked.length > 0 ? picked : slots.slice(0, 5);
 }
 
 /**
@@ -758,18 +1577,69 @@ function offer(slots: Slot[]): string {
  * three Saturday slots is a narrowing, not a choice, and booking one of them
  * would be inventing a decision the customer never made.
  */
-function narrowSlots(slots: Slot[], m: Memory): Slot[] {
+function narrowSlots(slots: Slot[], m: Memory, turn: Turn): Slot[] {
   if (m.chosenSlotLabel) {
     // If the time they picked has since been taken, this is empty and the
     // customer is asked again rather than booked into a different slot.
-    return slots.filter((slot) => slot.label === m.chosenSlotLabel);
+    return slots.filter(
+      (slot) => slot.label === m.chosenSlotLabel || shortLabel(slot.label) === m.chosenSlotLabel,
+    );
   }
 
   for (const said of [...m.said].reverse()) {
     const matched = slots.filter((slot) => saidMatchesSlot(slot.label, said));
     if (matched.length > 0) return matched;
+    const relative = relativeSlots(said, slots, turn);
+    if (relative.length > 0) return relative;
   }
   return [];
+}
+
+/**
+ * "Tomorrow afternoon", "this weekend", "today" — times said the way people
+ * say them.
+ *
+ * Worked out in the dealership's own time zone from the clock the turn was
+ * answered at, and kept to the NEAREST such day: "tomorrow" in a two-week
+ * diary is one date, not both Thursdays.
+ */
+function relativeSlots(said: string, slots: Slot[], turn: Turn): Slot[] {
+  const lower = said.toLowerCase();
+  const weekday = (offset: number) =>
+    new Intl.DateTimeFormat('en-US', { timeZone: turn.digest.timezone, weekday: 'long' }).format(
+      new Date(turn.now.getTime() + offset * 86_400_000),
+    );
+
+  const days: string[] = [];
+  if (/\b(today|tonight|later today)\b/.test(lower)) days.push(weekday(0));
+  if (/\b(tomorrow|tmrw|tmr|esok)\b/.test(lower)) days.push(weekday(1));
+  const weekend = /\b(weekend|wkend)\b/.test(lower);
+  if (weekend) days.push('Saturday', 'Sunday');
+
+  const part =
+    /\bmorning\b/.test(lower) ? 'morning'
+      : /\bafternoon\b/.test(lower) ? 'afternoon'
+        : /\b(evening|after work)\b/.test(lower) ? 'evening'
+          : undefined;
+
+  if (days.length === 0 && !part) return [];
+
+  let pool = days.length ? slots.filter((slot) => days.some((day) => slot.label.startsWith(day))) : slots;
+
+  if (days.length) {
+    // The nearest occurrence only: one date, or the first weekend's two.
+    const dates = [...new Set(pool.map((slot) => slot.label.split(' at ')[0]!))].slice(0, weekend ? 2 : 1);
+    pool = pool.filter((slot) => dates.includes(slot.label.split(' at ')[0]!));
+  }
+  if (part) pool = pool.filter((slot) => partOfDay(slot.label) === part);
+  return pool;
+}
+
+function partOfDay(label: string): 'morning' | 'afternoon' | 'evening' | undefined {
+  const match = /at (\d{1,2}):\d{2}[\s\u202f\u00a0]*([ap])/i.exec(label);
+  if (!match) return undefined;
+  const hour = Number(match[1]) % 12 + (match[2]!.toLowerCase() === 'p' ? 12 : 0);
+  return hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
 }
 
 /* -------------------------------------------------------------------------- */
@@ -779,14 +1649,64 @@ function narrowSlots(slots: Slot[], m: Memory): Slot[] {
 /**
  * The gate in front of every write tool.
  *
+ * Asks for exactly what is missing — never for a name somebody gave two
+ * messages ago — and, when an answer could not be read, says so rather than
+ * repeating the question word for word.
+ *
  * Consent is a yes to a question about being contacted. An email address is an
  * identifier, not a permission, so giving one is never treated as agreeing to
  * anything (spec §19, docs/08-security-review.md).
  */
-function askContact(m: Memory, lead: string): Decision | undefined {
-  if (!m.name || !m.email) return say(`${lead} ${ask(m, 'contact')}`);
-  if (!m.consent) return say(`${voiceFor(m.seed).pick('consent:lead', GOT_IT).replace(/\.$/, '')}, ${firstName(m.name)}. ${ask(m, 'consent')}`);
+function askContact(m: Memory, lead: string, need: { phone?: boolean } = {}): Decision | undefined {
+  const v = voice(m);
+  const missing = {
+    name: !m.name,
+    email: !m.email,
+    phone: Boolean(need.phone) && !m.phone,
+  };
+
+  if (missing.name || missing.email || missing.phone) {
+    const kind: AskKind =
+      missing.name && missing.email && missing.phone ? 'contactPhone'
+        : missing.name && missing.email ? 'contact'
+          : missing.name && missing.phone ? 'namePhone'
+            : missing.email && missing.phone ? 'emailPhone'
+              : missing.name ? 'name'
+                : missing.email ? 'email'
+                  : 'phone';
+
+    // Already asked for exactly this, and still nothing we could read.
+    const retry = askedLastTime(m, kind) ? RETRIES[kind] : undefined;
+    const question = retry ? v.pick(`retry:${kind}`, retry) : ask(m, kind);
+
+    // Half-way through giving details, the lead is a thank-you, not the
+    // original sentence again.
+    const midway = askedForContact(m.asked);
+    const thanks = m.name
+      ? `${v.pick('contact:thanks', GOT_IT).replace(/\.$/, '')}, ${firstName(m.name)}.`
+      : v.pick('contact:thanks', GOT_IT);
+
+    return say(sentences(midway && !retry ? thanks : retry ? '' : lead, question));
+  }
+
+  if (!m.consent) {
+    return say(`${v.pick('consent:lead', GOT_IT).replace(/\.$/, '')}, ${firstName(m.name!)}. ${ask(m, 'consent')}`);
+  }
   return undefined;
+}
+
+const CONTACT_ASKS: AskKind[] = ['contact', 'contactPhone', 'name', 'email', 'phone', 'emailPhone', 'namePhone'];
+
+function askedForContact(text: string): boolean {
+  return CONTACT_ASKS.some((kind) => ASKS[kind].some((q) => text.includes(q)));
+}
+
+function askedLastTime(m: Memory, kind: AskKind): boolean {
+  if (kind !== 'email' && kind !== 'phone') return false;
+  return (
+    ASKS[kind].some((q) => m.asked.includes(q)) ||
+    (RETRIES[kind] ?? []).some((q) => m.asked.includes(q))
+  );
 }
 
 function contactInput(m: Memory): Record<string, unknown> {
@@ -799,20 +1719,25 @@ function contactInput(m: Memory): Record<string, unknown> {
 }
 
 function firstName(name: string): string {
-  return name.split(/\s+/)[0] ?? name;
+  const first = name.split(/\s+/)[0] ?? name;
+  return first.startsWith('@') ? name : first;
 }
 
 function cancelTurn(m: Memory): Decision {
-  if (!m.confirmationCode || !m.email) return say(`${voiceFor(m.seed).pick('cancel', ['I can sort that out.', 'Of course, no problem.', 'Easily done.'])} ${ask(m, 'code')}`);
-  return call(
-    t('cancelTestDrive', { confirmationCode: m.confirmationCode, email: m.email }),
-  );
+  if (!m.confirmationCode || !m.email) {
+    return say(
+      sentences(
+        voice(m).pick('cancel', ["Of course, I can sort that out.", 'No problem at all.', 'Easily done.']),
+        ask(m, 'code'),
+      ),
+    );
+  }
+  return call(t('cancelTestDrive', { confirmationCode: m.confirmationCode, email: m.email }));
 }
 
 function callbackTurn(m: Memory): Decision {
-  if (!m.name || !m.email) return say(`${voiceFor(m.seed).pick('callback', ON_IT)} ${ask(m, 'contact')}`);
-  if (!m.phone) return say(ask(m, 'phone'));
-  if (!m.consent) return say(`${voiceFor(m.seed).pick('consent:lead', GOT_IT).replace(/\.$/, '')}, ${firstName(m.name)}. ${ask(m, 'consent')}`);
+  const missing = askContact(m, voice(m).pick('callback', ON_IT), { phone: true });
+  if (missing) return missing;
 
   return call(
     t('createCallbackRequest', {
@@ -838,13 +1763,13 @@ function tradeInTurn(m: Memory): Decision {
     const known = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
     return say(
       known
-        ? `${ask(m, 'appraisal')} What is ${sentenceList(missingDetails)} of the ${known}?`
+        ? `${ask(m, 'appraisal')} What's ${sentenceList(missingDetails)} of the ${known}?`
         : `${ask(m, 'appraisal')} ${ask(m, 'vehicle')}`,
     );
   }
   if (!vehicle.condition) return say(ask(m, 'condition'));
 
-  const missing = askContact(m, 'Thank you.');
+  const missing = askContact(m, 'Thank you, that is everything I need about the car.');
   if (missing) return missing;
 
   return call(
@@ -860,13 +1785,74 @@ function tradeInTurn(m: Memory): Decision {
 }
 
 function handoffTurn(m: Memory): Decision {
-  const missing = askContact(m, "Of course. I'll get a specialist onto this.");
+  const missing = askContact(
+    m,
+    m.latest.negotiating || m.negotiating
+      ? voice(m).pick('handoff:price', [
+          "Pricing is one for our sales specialists: they're the ones who can talk you through what's possible.",
+          "I'll leave the numbers to our sales specialists, who can go through what's possible with you.",
+        ])
+      : voice(m).pick('handoff:lead', [
+          "Of course. I'll get one of our specialists onto this.",
+          'Absolutely, let me bring in one of our specialists.',
+          "Certainly. I'll pass you to one of our specialists.",
+        ]),
+  );
   if (missing) return missing;
 
   return call(
     t('requestHumanHandoff', {
       ...contactInput(m),
       reason: reasonFrom(m, 'Customer asked to speak to a specialist.'),
+      department: 'sales',
+    }),
+  );
+}
+
+/**
+ * Ready to buy. The hottest message a dealership gets, and it goes straight
+ * to a salesperson with the car and the customer's own words attached.
+ */
+function purchaseTurn(m: Memory, digest: Digest): Decision {
+  const v = voice(m);
+  const model = m.modelSlug ? ` on the ${modelShortName(m, digest)}` : '';
+  const missing = askContact(
+    m,
+    sentences(
+      v.pick('buy:lead', [`Brilliant, let's get that moving${model}!`, `Wonderful news${model ? `, the ${modelShortName(m, digest)} is a great choice` : ''}!`, "That's great to hear!"]),
+      "I'll get one of our sales specialists to take you through the next steps.",
+    ),
+    { phone: true },
+  );
+  if (missing) return missing;
+
+  return call(
+    t('requestHumanHandoff', {
+      ...contactInput(m),
+      reason: reasonFrom(m, `Ready to buy${m.modelSlug ? ` the ${modelShortName(m, digest)}` : ''}.`),
+      department: 'sales',
+    }),
+  );
+}
+
+/**
+ * A complaint. Apologised for, then handed to a person — never argued with,
+ * and never answered by the assistant on the dealership's behalf.
+ */
+function complaintTurn(m: Memory): Decision {
+  const missing = askContact(
+    m,
+    voice(m).pick('complaint:lead', [
+      "I'm really sorry to hear that. I'll make sure a manager hears about it and gets back to you personally.",
+      "I'm sorry, that's not the experience we want anyone to have. Let me get a manager to look into it for you.",
+    ]),
+  );
+  if (missing) return missing;
+
+  return call(
+    t('requestHumanHandoff', {
+      ...contactInput(m),
+      reason: reasonFrom(m, 'Customer complaint.'),
       department: 'sales',
     }),
   );
@@ -885,7 +1871,7 @@ function serviceTurn(m: Memory): Decision {
     return call(t('getDealershipHours', { department: 'service' }));
   }
 
-  const missing = askContact(m, 'Our service team can help with that.');
+  const missing = askContact(m, 'Our service team can definitely help with that.');
   if (missing) return missing;
 
   const question = m.said.filter((said) => said.trim().length >= 12).at(0) ?? 'Service enquiry.';
@@ -900,7 +1886,10 @@ function serviceTurn(m: Memory): Decision {
 }
 
 function ticketTurn(m: Memory): Decision {
-  const missing = askContact(m, 'I will pass it to the team.');
+  const missing = askContact(
+    m,
+    voice(m).pick('ticket:lead', ["Of course, I'll pass it to the team.", 'Leave it with me, I will get that to the team.']),
+  );
   if (missing) return missing;
 
   const question = m.openQuestion ?? 'A question the assistant could not answer.';
@@ -915,18 +1904,13 @@ function ticketTurn(m: Memory): Decision {
 }
 
 function financeRequestTurn(m: Memory, digest: Digest): Decision {
-  const missing = askContact(m, 'I can get a specialist to confirm the terms.');
+  const missing = askContact(m, "Great, I'll get a finance specialist to confirm the terms.");
   if (missing) return missing;
-  if (!m.modelSlug) return say(`${ask(m, 'model')}\n\n${range(digest)}`);
+  if (!m.modelSlug) return say(paragraphs(ask(m, 'model'), range(digest)));
 
   // The price is re-read rather than remembered: the request must record what
   // the catalogue says today, not what was quoted three turns ago.
   return call(t('getVehicle', { modelSlug: m.modelSlug }));
-}
-
-/** True when the customer accepted the offer of a specialist, or asked outright. */
-function applying(m: Memory): boolean {
-  return m.financeApplication;
 }
 
 function reasonFrom(m: Memory, fallback: string): string {
@@ -935,40 +1919,24 @@ function reasonFrom(m: Memory, fallback: string): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Fallbacks                                                                   */
+/* Names                                                                       */
 /* -------------------------------------------------------------------------- */
 
-/**
- * The reply when nothing else fits.
- *
- * Three things, in this order, and the order is the whole point:
- *
- *   1. that the answer is worth getting right — not that our database is
- *      missing a row, which is our problem and not the customer's
- *   2. what CAN be answered right now, concretely, so the next message is easy
- *   3. a real offer to put the question to a person, which becomes a ticket
- *
- * What it must never be is a dead end. A customer who gets "I don't have that"
- * and nothing else closes the window, and the dealership never learns they
- * were there — which is the one outcome this whole system exists to prevent.
- */
-function cannotHelp(m: Memory): string {
-  const v = voiceFor(m.seed);
-  return sentences(
-    v.pick('cannot:lead', CANNOT_HELP),
-    v.pick('cannot:can', [
-      "Off the top of my head I can talk you through any of the cars, what they cost, how they're specced, what's on the ground today, a finance estimate, or get you booked in for a drive.",
-      "What I've got at my fingertips: the range, prices and finance, engines and trims, colours, what's in stock right now, and the diary for test drives.",
-      "I can help with any of the cars themselves: specs, trims, colours, prices, finance, what we've got here. I can book you a drive too.",
-      "Ask me about any of the cars, what they cost, what they're built in, what's here today, or booking a drive, and I'll have it for you straight away.",
-    ]),
-    `For anything else ${v.pick('cannot:team', OFFER_TEAM)}. ${v.pick('cannot:offer', [
-      'Shall I pass it on?',
-      'Would you like me to pass it along?',
-      'Want me to hand it over to them?',
-      'Shall I get them to come back to you?',
-    ])}`,
-  );
+/** "the S5", as a salesperson says it, from the catalogue's own name. */
+function modelShortName(m: Memory, digest: Digest): string {
+  const name = digest.models.find((model) => model.slug === m.modelSlug)?.name;
+  return name ? shortModel(name) : 'car';
+}
+
+/** "Premium Electric SUV" mid-sentence: lower case, but SUV stays SUV. */
+function softCase(text: string): string {
+  return text.replace(/\b([A-Z][a-z]+)\b/g, (word) => word.toLowerCase());
+}
+
+/** "Sinclair S5" is "S5" in conversation. */
+function shortModel(name: string): string {
+  const words = name.trim().split(/\s+/);
+  return words.length > 1 ? words.slice(1).join(' ') : name;
 }
 
 /**
@@ -995,6 +1963,7 @@ function inventedModel(m: Memory, digest: Digest): string | undefined {
   // If they named a car we do build, the other token is something else — a
   // quarter, a trim, a number of seats — and not a model we should deny making.
   if (tokens.some((token) => known.has(token.toLowerCase()))) return undefined;
+  if (m.latest.modelSlugs.length > 0) return undefined;
 
   return tokens.find(
     (token) => !known.has(token.toLowerCase()) && !readsAsATimeframe(said, token),
@@ -1009,7 +1978,7 @@ function inventedModel(m: Memory, digest: Digest): string | undefined {
  * exactly the answer a customer asking about a rival's car needs.
  */
 function readsAsATimeframe(said: string, token: string): boolean {
-  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, (char) => `\\${char}`);
   return (
     new RegExp(`\\b(by|in|before|after|until|during)\\s+${escaped}\\b`, 'i').test(said) ||
     new RegExp(`\\b${escaped}\\s+(of\\s+)?(next|this|last)\\s+year`, 'i').test(said) ||
@@ -1055,7 +2024,6 @@ function range(digest: Digest): string {
 /* -------------------------------------------------------------------------- */
 /* Resolving a build from what the tools returned                              */
 /* -------------------------------------------------------------------------- */
-
 
 /**
  * A model, trim and powertrain that are actually offered together.

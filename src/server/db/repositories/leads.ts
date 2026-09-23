@@ -2,7 +2,7 @@ import 'server-only';
 import { and, eq, desc, isNull, or, inArray, sql } from 'drizzle-orm';
 import {
   leads, leadEvents, leadSignals, customers, staffUsers, staffNotes,
-  messages, appointments, tickets, vehicleModels,
+  messages, appointments, tickets, vehicleModels, channelIdentities,
 } from '@/server/db/schema';
 import type { TenantDb } from '@/server/db/tenant-db';
 import type { StaffContext } from '@/server/auth/require-staff';
@@ -127,7 +127,7 @@ export async function getLeadDetail(db: TenantDb, staff: StaffContext, leadId: s
   const row = rows[0];
   if (!row) return null;
 
-  const [signals, timeline, notes, transcript, appointmentRows, ticketRows, model] =
+  const [signals, timeline, notes, transcript, appointmentRows, ticketRows, model, channelRows] =
     await Promise.all([
       db
         .select({
@@ -212,6 +212,23 @@ export async function getLeadDetail(db: TenantDb, staff: StaffContext, leadId: s
             )
             .limit(1)
         : Promise.resolve([]),
+
+      // Where they can be answered. A lead that came in over Instagram is
+      // answered by opening Instagram, and the handle is how the salesperson
+      // finds the thread.
+      db
+        .select({
+          channel: channelIdentities.channel,
+          displayName: channelIdentities.displayName,
+        })
+        .from(channelIdentities)
+        .where(
+          and(
+            eq(channelIdentities.tenantId, db.tenantId),
+            eq(channelIdentities.customerId, row.customer.id),
+          ),
+        )
+        .limit(5),
     ]);
 
   return {
@@ -219,6 +236,7 @@ export async function getLeadDetail(db: TenantDb, staff: StaffContext, leadId: s
     customer: row.customer,
     assignedTo: row.assignedTo,
     modelName: model[0]?.fullName ?? null,
+    channels: channelRows,
     signals,
     timeline,
     notes,

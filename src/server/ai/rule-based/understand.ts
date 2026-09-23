@@ -1,3 +1,6 @@
+import { normalise, isSalam } from './normalise';
+import { checkLanguage, withoutProfanity } from './moderation';
+
 /**
  * Understanding what the customer asked for, without a model.
  *
@@ -6,6 +9,15 @@
  * cannot. It is deterministic, which makes it a genuinely useful thing to
  * demonstrate a workflow with: the same sentence produces the same result
  * every time.
+ *
+ * Three passes, in order:
+ *
+ *   moderation      swearing, insults and slurs are noticed on the raw text,
+ *                   and swearing is taken out so a real question with a swear
+ *                   word in it is still read as the question it is
+ *   normalisation   slang, misspellings and everyday Malay are turned into the
+ *                   words the patterns were written against (normalise.ts)
+ *   classification  one intent, chosen by how unambiguous each signal is
  *
  * NOTHING here knows a dealership's catalogue.
  *
@@ -20,34 +32,64 @@
  */
 
 export type Intent =
+  // The conversation itself.
   | 'greeting'
+  | 'how_are_you'
+  | 'who_are_you'
+  | 'thanks'
+  | 'goodbye'
+  | 'acknowledge'
+  | 'compliment'
+  | 'complaint'
+  | 'abuse'
+  | 'privacy'
+  | 'injection'
+  | 'language'
+  // Finding a car.
   | 'search_vehicles'
   | 'range'
   | 'rank'
   | 'best_value'
   | 'recommend'
-  | 'delivery'
-  | 'specs'
+  | 'compare'
+  | 'competitor'
   | 'body_not_built'
+  // About one car.
   | 'vehicle_overview'
   | 'powertrains'
   | 'trims'
   | 'colours'
   | 'options'
   | 'features'
+  | 'feature_check'
+  | 'transmission'
+  | 'charging'
   | 'price'
-  | 'compare'
+  | 'specs'
   | 'stock'
+  | 'delivery'
+  // Buying one.
   | 'finance'
-  | 'hours'
-  | 'location'
+  | 'payment'
+  | 'purchase'
+  | 'promotions'
+  | 'insurance'
+  | 'registration'
+  | 'warranty'
+  | 'used_cars'
+  | 'home_delivery'
+  | 'trade_in'
+  // Coming in.
   | 'test_drive'
   | 'cancel'
+  | 'hours'
+  | 'location'
+  | 'about_company'
+  | 'careers'
+  // A person.
   | 'callback'
-  | 'trade_in'
-  | 'service'
   | 'human'
-  | 'thanks'
+  | 'service'
   | 'unknown';
 
 /** Purchase timeframes, as the signals schema defines them. */
@@ -75,6 +117,10 @@ export type RankCriterion =
 
 export interface Understanding {
   intent: Intent;
+  /** The text the classifier actually read: normalised, swearing removed. */
+  normalised: string;
+  /** Set whenever the intent is 'rank'. Never guessed for anything else. */
+  rankCriterion?: RankCriterion;
   /**
    * A body shape they asked for that nothing in this schema can be.
    *
@@ -84,8 +130,6 @@ export interface Understanding {
    * of letting the question fall through to a shrug.
    */
   unbuiltBody?: string;
-  /** Set whenever the intent is 'rank'. Never guessed for anything else. */
-  rankCriterion?: RankCriterion;
   /** Catalogue slugs the message named, in the order they appeared. */
   modelSlugs: string[];
   /**
@@ -96,16 +140,30 @@ export interface Understanding {
    * under-capturing is not.
    */
   words: string[];
+  /** Named pieces of equipment ("carplay", "heated seats"), in canonical form. */
+  featureTerms: string[];
   budgetCents?: number;
   bodyStyle?: 'sedan' | 'coupe' | 'suv' | 'crossover' | 'pickup' | 'wagon';
   electric?: boolean;
+  hybrid?: boolean;
   awd?: boolean;
   seats?: number;
+  /** Shopping for a family: a hint towards the roomier shapes, never a filter on its own. */
+  family?: boolean;
   name?: string;
   email?: string;
   phone?: string;
   /** An explicit yes, for confirmation steps. */
   affirmative: boolean;
+  /** An explicit no, for the same. */
+  negative: boolean;
+  /** A few words at most — the length of a reply, not of a question. */
+  short: boolean;
+  /** Greeted with "salam" or "assalamualaikum", which deserves the greeting back. */
+  salam: boolean;
+  profane: boolean;
+  insult: boolean;
+  slur: boolean;
   dateHint?: string;
   termMonths?: number;
   timeframe?: Timeframe;
@@ -115,9 +173,17 @@ export interface Understanding {
   justBrowsing?: boolean;
 }
 
-/** The tenant's own range. Read from the catalogue, never hardcoded. */
+/**
+ * The tenant's own range and brand. Read from the catalogue, never hardcoded.
+ *
+ * The brand matters for one reason: a customer naming another manufacturer is
+ * asking about a competitor, and a customer naming THIS one is not. A Toyota
+ * dealership's "is the Toyota warranty any good" is a question about its own
+ * cars, and must never be answered as a question about someone else's.
+ */
 export interface Vocabulary {
   models: { slug: string; name: string }[];
+  brand?: string;
 }
 
 /**
@@ -147,29 +213,237 @@ const STOP_WORDS = new Set([
   'years', 'yes', 'you', 'your',
 ]);
 
+/* -------------------------------------------------------------------------- */
+/* Yes and no                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A yes. Read on the raw text as well as the normalised one, because the
+ * normaliser turns "boleh" into "can" — which is right for "boleh test drive?"
+ * and wrong for "boleh" said on its own in reply to an offer.
+ */
+const AFFIRMATIVE =
+  /\b(yes|yeah|yep|yup|ya|iya|y|sure|sure thing|please|please do|go ahead|go on|that works|sounds good|sounds great|ok|okay|alright|all right|correct|confirm|confirmed|absolutely|definitely|of course|why not|let'?s do it|do it|boleh|baik|setuju|yes please)\b/;
+
+/** Positive phrases that happen to contain "no". */
+const NOT_A_NO = /\bno (problem|problems|worries|rush|issue|issues)\b/g;
+
+const NEGATIVE =
+  /\b(no|nope|nah|no thanks|no thank you|not now|not really|not yet|maybe later|later|i'?m good|i'?m ok|i'?m fine|not interested|don'?t|do not|never mind|nothing|tak|tidak|nda|inda|bukan|takpe|tak apa)\b/;
+
+/* -------------------------------------------------------------------------- */
+/* Equipment                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Things a customer asks whether a car HAS.
+ *
+ * Canonical name first, then how people say it. The canonical name is also
+ * what is searched for in the equipment and option lists the tools return,
+ * alongside the customer's own words — so "CarPlay" finds "Wireless Apple
+ * CarPlay" and "sunroof" finds "Panoramic glass roof".
+ */
+const FEATURES: [string, RegExp][] = [
+  ['carplay', /\b(carplay|apple car ?play)\b/],
+  ['android auto', /\bandroid auto\b/],
+  ['sunroof', /\b(sunroof|moon ?roof|panoramic( glass)? roof|glass roof|panoramic)\b/],
+  ['heated seats', /\b(heated (front |rear )?seats?|seat heat\w*)\b/],
+  ['ventilated seats', /\b(ventilated|cooled|cooling) seats?\b/],
+  ['massage seats', /\bmassag\w* seats?\b/],
+  ['leather', /\b(leather|nappa)\b/],
+  ['cruise control', /\b(adaptive )?cruise control\b/],
+  ['lane assist', /\blane (assist|keep\w*|departure|centr\w*)\b/],
+  ['blind spot', /\bblind ?spot\b/],
+  ['parking sensors', /\b(parking sensors?|park(ing)? assist|sensors)\b/],
+  ['camera', /\b(reversing camera|rear camera|backup camera|360( degree)? camera|surround view|cameras?)\b/],
+  ['head-up display', /\b(head.?up display|hud)\b/],
+  ['wireless charging', /\b(wireless charg\w*|wireless phone charg\w*|phone charg\w*)\b/],
+  ['bluetooth', /\bbluetooth\b/],
+  ['navigation', /\b(navigation|satnav|gps)\b/],
+  ['keyless', /\b(keyless|push (button )?start|remote start)\b/],
+  ['towing', /\b(tow ?bar|towing (package|pack|hitch)|tow hitch)\b/],
+  ['roof rails', /\broof (rails?|rack)\b/],
+  ['alloy wheels', /\b(alloys?|alloy wheels?|rims)\b/],
+  ['headlights', /\b(led (head)?lights?|matrix (led|lights?)|headlights?)\b/],
+  ['sound system', /\b(sound system|speakers?|premium audio|audio system|stereo|bose|harman|burmester|bang (and|&) olufsen)\b/],
+  ['display', /\b(touch ?screen|screen size|infotainment|big screen)\b/],
+  ['climate control', /\b(climate control|dual.?zone|tri.?zone|three.?zone|air ?con\w*|aircon)\b/],
+  ['air suspension', /\b(air suspension|adaptive suspension|adaptive damp\w*)\b/],
+  ['tailgate', /\b(power|electric|powered|hands.?free) tailgate\b/],
+  ['third row', /\b(third row|3rd row|seven seats|7 seats)\b/],
+  ['isofix', /\b(isofix|child seats?|baby seats?)\b/],
+  ['airbags', /\bairbags?\b/],
+  ['driver assist', /\b(autopilot|self.?driving|autonomous|driver assist\w*)\b/],
+];
+
+function findFeatures(lower: string): string[] {
+  return FEATURES.filter(([, pattern]) => pattern.test(lower)).map(([name]) => name);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The patterns                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** Attempts to talk the assistant out of its job. Answered neutrally, never obeyed. */
+const INJECTION =
+  /\b(ignore (all |any |your |the |these )?(previous |prior |above |earlier )?(instructions|rules|prompts?|directions)|disregard (all |your |the )?(instructions|rules|prompt)|system prompt|your (instructions|prompt|rules|programming|guidelines)|reveal (your|the) (prompt|instructions|rules|system|code)|developer mode|dev mode|admin mode|god mode|jailbreak|dan mode|you are now|from now on you|pretend (to be|you are|you're)|act as (a|an|if|my)|roleplay|sudo|drop table|select \* from|union select|<script|javascript:|api key|access token|admin password|database dump)\b/;
+
+/** Other people's information. Never shared, never confirmed, never denied. */
+const PRIVACY =
+  /\b(other (customers?|people|clients?|buyers?)'?s? (details|info|information|data|bookings?|emails?|numbers?|names?)|who (else )?(has |have )?(booked|bought|reserved|enquired|test driven)|customer (list|data|details|records|database|info)|(their|his|her|someone'?s|somebody'?s|another customer'?s) (email|phone|number|address|details|booking|information)|list (of )?(customers|bookings|leads|appointments)|all (your |the )?(customers|bookings|leads|appointments)|leads? (list|data)|show me (the |all )?(bookings|appointments|leads|customers)|previous (owner|customer|buyer)'?s? (details|info|information|name|number|contact))\b/;
+
+/** "Did Jo book a drive?" — about somebody else, however it is phrased. */
+const SOMEONE_ELSES_BOOKING =
+  /\b(did|has|have) (?!you\b|i\b|we\b|it\b|they\b|the\b|this\b|that\b|there\b)[a-z]+( [a-z]+)? (book|booked|bought|buy|purchase|purchased|reserve|reserved|enquire|enquired)\b/;
+
+const COMPLAINT =
+  /\b(complain\w*|complaint|not happy|unhappy|disappointed|disappointing|terrible (service|experience)|horrible|worst (service|experience|dealer\w*)|rude|bad (service|experience)|poor service|angry|furious|refund|ripped off|rip off|(service|experience|staff|salesman|salesperson|team) (was|is|has been|were) (terrible|awful|bad|poor|horrible|shocking|appalling|unacceptable|rubbish|a joke))\b/;
+
+const WHO_ARE_YOU =
+  /\b(are you (a |an )?(bot|robot|ai|human|real|person|real person|machine|computer|automated|chatbot)|am i (talking|speaking|chatting) (to|with)|who am i (talking|speaking|chatting) (to|with)|who is this|who are you(?! guys)|what'?s your name|what is your name|is this (a bot|automated|an ai|ai|a real person|a human|a person)|you a bot)\b/;
+
+const HUMAN =
+  /\b(speak to|talk to|speak with|talk with|salesperson|sales person|someone|a human|a person|real person|advisor|adviser|agent|manager|staff member)\b/;
+
+/** A car that is being fixed, as opposed to one being bought. */
+const SERVICE =
+  /\b(servic\w*|repair\w*|maintenance|mot|oil change|recall|bodyshop|parts|broken|breakdown|broke down|warning light|check engine)\b/;
+
+const WARRANTY = /\b(warrant(y|ies)|guarantee)\b/;
+
+const TEST_DRIVE =
+  /\b(test drives?|drive it|come in and drive|book a drive|driving it|take (it|one|her) for a (spin|drive)|go for a spin|try (it|one) out|drive (one|the \w+)|see (it|one|the car) in person|view (it|the car|one)|viewing|book (a |an )?(visit|viewing|appointment)|make an appointment|schedule (a |an )?(visit|viewing|appointment|drive))\b/;
+
+const COMPETITOR_BRANDS = [
+  'toyota', 'honda', 'nissan', 'mazda', 'mitsubishi', 'subaru', 'suzuki', 'lexus',
+  'infiniti', 'acura', 'hyundai', 'kia', 'genesis', 'bmw', 'mercedes', 'merc', 'benz',
+  'audi', 'volkswagen', 'vw', 'porsche', 'volvo', 'tesla', 'byd', 'proton', 'perodua',
+  'ford', 'chevrolet', 'chevy', 'jeep', 'dodge', 'land rover', 'range rover', 'jaguar',
+  'peugeot', 'renault', 'citroen', 'isuzu', 'geely', 'chery', 'haval', 'polestar',
+];
+
+const BEST_VALUE =
+  /\b(best value|value for money|worth (it|the extra|the money|the upgrade|the step)|worth (paying|going) up|which trim should|what do (i|you) get for the extra|bang for (your|the) buck)\b/;
+
+const RECOMMEND =
+  /\b(what should (i|we) (buy|get|go for|look at)|which (one )?(should|would) (i|you)|what do you recommend|any recommendations?|recommend (me )?(one|a|something)|help me (choose|decide|pick)|(i'?m |im )?not sure what (i want|to get)|what would you (suggest|recommend|go for)|which is best for|best (car|one) for|what'?s good for|suggest (a|one|something))\b/;
+
+const HOME_DELIVERY =
+  /\b(do you deliver|deliver (it|the car|to (my|me|your)|home)|home delivery|delivered to (my|me)|drop (it|the car) off)\b/;
+
+const DELIVERY =
+  /\b(how (long|soon)|lead time|waiting (list|time)|delivery time|when (can|could|would) (i|we) (get|have|take|collect)|how quickly can|order time|turnaround)\b/;
+
+const RANGE =
+  /\b((what|which) (other |else )?(cars?|models?|vehicles?) (do|have|are|can|you (got|have|sell|do))|(cars?|models?) (do )?you (got|have|sell)|what (else )?do you (make|sell|build|offer|do)|show me (the |your )?(range|lineup|line.?up|models?|cars?|everything)|(the|your|full|whole|entire) (range|lineup|line.?up)\b|all (of )?(your|the) (cars?|models?)|what'?s in the range|list (the |your )?(cars?|models?)|what (cars?|models?) (are there|are available|do you have))/;
+
+const CHARGING =
+  /\b(charging|charger|chargers|charge time|to charge|fast charg\w*|rapid charg\w*|home charg\w*|charging point|charge (it|at home|the car|overnight)|how long (does it take )?to charge|plug.?in)\b/;
+
+const PURCHASE =
+  /\b(ready to buy|want to buy|like to buy|i'?ll take (it|one)|i will take (it|one)|how (do|can) i (buy|purchase|order|get one)|buy (it|one) now|place (an|the|my) order|order (one|it)|reserve (it|one|the car|a car)|put (down )?a deposit|pay (a|the) deposit|hold (it|one|the car) for me|sign (the )?(papers|paperwork|contract)|make it mine)\b/;
+
+const PROMOTIONS =
+  /\b(promo|promos|promotions?|special offers?|any offers|current offers|latest offers|deals|any deal|cashback|rebates?|on sale|sale on|(year|month) end (sale|offers?)|raya (offers?|promo|sale))\b/;
+
+const PAYMENT =
+  /\b(pay(ing)? (with|by|in|using|via|cash|full|upfront|outright)|payment (method|option|plan)s?|how (do|can) i pay|credit card|debit card|bank transfer|cheque|pay in full|full payment|deposit)\b/;
+
+const INSURANCE = /\b(insur\w*|comprehensive cover)\b/;
+
+const REGISTRATION =
+  /\b(registration|register (the|my) car|road ?tax|number plates?|licen[cs]e plates?|plates)\b/;
+
+const USED =
+  /\b(used (cars?|ones?|vehicles?|models?|stock)|any used|second hand|pre-?owned|ex-?demo|demo (car|model)s?|certified pre)\b/;
+
+const HOURS =
+  /\b(open|opening hours|opening times|what time|when are you|closing time|close today|closed on|business hours|operating hours|your hours)\b/;
+
+const LOCATION =
+  /\b(where are you|where is (the |your )?(showroom|dealership|shop|branch)|address|located|location|directions|how (do|can) i get (there|to you)|google maps|waze|branch(es)?|near me|phone number|contact number|whatsapp|email address)\b/;
+
+const CONTACT_US = /\b(how (can|do) (i|we) (contact|reach)|contact (details|number|info))\b/;
+
+const ABOUT_COMPANY =
+  /\b(about (the |your )?(company|dealership|brand|business|you guys)|who (are|is) (you guys|your company|the company)|tell me about (yourselves|your company|the company|the dealership|the brand|you guys)|how long have you (been|existed)|what is (this|your) (company|dealership|brand)|your (company|dealership|brand) (history|story))\b/;
+
+const CAREERS =
+  /\b(job (openings?|vacanc\w*|applications?)|any jobs|hiring|vacanc\w*|careers?|work for you|internships?|apply for a (job|position))\b/;
+
+const LANGUAGE =
+  /\b((speak|cakap|talk|chat|understand|reply|respond) (in )?(malay|bahasa|melayu|chinese|mandarin)|bahasa melayu|in malay|dalam bahasa)\b/;
+
+const HOW_ARE_YOU =
+  /\b(how are you|how r you|how're you|how's it going|how is it going|how's your day|how are things|how you doing|how do you do|what khabar|what's up|sup)\b/;
+
+const TRANSMISSION =
+  /\b(manual|automatic|auto gearbox|gearbox|transmission|stick shift|cvt|dct|paddle shift\w*)\b/;
+
+const COMPLIMENT =
+  /\b(you'?re (so |very |really )?(helpful|great|amazing|awesome|brilliant|the best|smart|good)|very helpful|so helpful|super helpful|good bot|great bot|nice bot|love (it|this|the \w+|your \w+)|(looks?|sounds?) (amazing|great|awesome|beautiful|gorgeous|stunning|lovely|nice)|beautiful car|nice car|great car|gorgeous|stunning|impressive)\b/;
+
+const GOODBYE =
+  /\b(bye|goodbye|good bye|bye bye|see you|see ya|cya|catch you later|talk (to you )?later|ttyl|that'?s all|that is all|nothing else|i'?m done|all good thanks|have a (good|nice|great) (day|one|night|evening|weekend)|good night|take care)\b/;
+
+const THANKS = /\b(thanks|thank you|cheers|appreciate|appreciated|much obliged)\b/;
+
+const GREETING =
+  /^\s*(hi|hello|hey|hiya|howdy|yo|greetings|good (morning|afternoon|evening|day)|morning|evening|afternoon)\b/;
+
+/** A reply that acknowledges rather than asks. Only counted when it is short. */
+const ACKNOWLEDGE =
+  /^(ok|okay|ok cool|okay cool|cool|nice|great|alright|all right|got it|i see|noted|sure|sounds good|perfect|awesome|fine|right|understood|makes sense|good|excellent|wow|oh|ah|hmm|interesting|oh nice|oh ok|ok then|ok thanks|lovely|brilliant|fair enough)$/;
+
+/* -------------------------------------------------------------------------- */
+/* Reading a message                                                           */
+/* -------------------------------------------------------------------------- */
+
 export function understand(text: string, vocabulary?: Vocabulary): Understanding {
-  const lower = text.toLowerCase();
+  const language = checkLanguage(text);
+  // Classified with the swearing removed, so "how much is the bloody X7" is
+  // still read as the price question it is.
+  const cleaned = language.profane ? withoutProfanity(text) : text;
+  const lower = normalise(cleaned);
+  const raw = text.toLowerCase();
+
+  const negative = NEGATIVE.test(raw.replace(NOT_A_NO, ' ')) || NEGATIVE.test(lower.replace(NOT_A_NO, ' '));
+  const words = lower.replace(/[^a-z0-9' ]/g, ' ').trim().split(/\s+/).filter(Boolean);
 
   const result: Understanding = {
     intent: 'unknown',
+    normalised: lower,
     modelSlugs: findModels(lower, vocabulary),
     words: contentWords(lower),
-    affirmative:
-      /\b(yes|yeah|yep|sure|please do|go ahead|that works|sounds good|ok|okay|correct|confirm)\b/.test(
-        lower,
-      ),
+    featureTerms: findFeatures(lower),
+    affirmative: !negative && (AFFIRMATIVE.test(raw) || AFFIRMATIVE.test(lower)),
+    negative,
+    short: words.length <= 5,
+    salam: isSalam(text),
+    profane: language.profane,
+    insult: language.insult,
+    slur: language.slur,
   };
 
-  result.budgetCents = undefined;
   result.bodyStyle = findBodyStyle(lower);
-  if (/\b(electric|ev|evs|battery|bev)\b/.test(lower)) result.electric = true;
-  if (/\b(awd|all.?wheel|4wd|four.?wheel|quattro)\b/.test(lower)) result.awd = true;
+  if (/\b(electric|ev|evs|battery|bev|fully electric|all.?electric)\b/.test(lower)) result.electric = true;
+  if (/\b(hybrid|hybrids|phev|self.?charging)\b/.test(lower)) result.hybrid = true;
+  if (/\b(awd|all.?wheel|4wd|4x4|four.?wheel|quattro|off.?road\w*)\b/.test(lower)) result.awd = true;
 
-  const seats = /\b(\d)\s*(?:seat|seats|seater)\b/.exec(lower);
+  const seats = /\b(\d)\s*-?\s*(?:seat|seats|seater)\b/.exec(lower);
   if (seats) result.seats = Number(seats[1]);
+  const spelledSeats = /\b(five|six|seven|eight)\s*-?\s*(?:seat|seats|seater)\b/.exec(lower);
+  if (spelledSeats) result.seats = { five: 5, six: 6, seven: 7, eight: 8 }[spelledSeats[1] as 'five']!;
+
+  // A family is a reason to look at the roomier shapes. It is only ever a
+  // hint, and only when they have not named a shape themselves.
+  if (/\b(family|families|kids|children|school run|baby|toddlers?)\b/.test(lower) || (result.seats ?? 0) >= 6) {
+    result.family = true;
+    result.bodyStyle ??= 'suv';
+  }
 
   const email = /[\w.+-]+@[\w-]+\.[\w.-]+/.exec(text);
-  if (email) result.email = email[0];
+  if (email) result.email = email[0].replace(/[.,;:]+$/, '');
 
   // Looked for in the text with the address already removed: an email is full
   // of digits and punctuation, and half of one reads convincingly as a number.
@@ -191,10 +465,12 @@ export function understand(text: string, vocabulary?: Vocabulary): Understanding
   );
 
   result.timeframe = findTimeframe(lower);
-  if (/\b(financ\w*|leas\w*|monthly|per month|a month|each month|apr|instal|credit)\b/.test(lower)) {
+  if (/\b(financ\w*|leas\w*|monthly|per month|a month|each month|apr|instal\w*|credit (check|score|rating|application|approval)|on credit|loan|down ?payment|interest rate|hire purchase)\b/.test(lower)) {
     result.financeInterest = true;
   }
-  if (/\b(trade.?ins?|part.?exchange|my old car)\b/.test(lower)) result.tradeInInterest = true;
+  if (/\b(trade.?ins?|part.?exchange|my old car|trade in my|sell my car|sell you my)\b/.test(lower)) {
+    result.tradeInInterest = true;
+  }
   if (isNegotiating(lower)) result.negotiating = true;
   if (/\b(just (looking|browsing)|no rush|not (buying|ready)|window shopping)\b/.test(lower)) {
     result.justBrowsing = true;
@@ -206,7 +482,12 @@ export function understand(text: string, vocabulary?: Vocabulary): Understanding
   const criterion = findRankCriterion(lower);
   if (criterion) result.rankCriterion = criterion;
 
-  result.intent = classify(lower, result);
+  result.intent = classify(lower, result, vocabulary);
+
+  // Swearing and nothing else worth answering is the conversation's problem,
+  // not a question: asked, kindly, to keep it friendly.
+  if (result.profane && result.intent === 'unknown') result.intent = 'abuse';
+
   // Carried only where it was actually asked for. A criterion left on a
   // question that turned out to be about something else is a ranking waiting
   // to be run against an intent that never wanted one.
@@ -262,7 +543,7 @@ function findRankCriterion(lower: string): RankCriterion | undefined {
   // "Your lowest price" is haggling and belongs to a person; "the lowest
   // priced car" is a fact about the range. Only the second sense is here.
   if (
-    /\b(cheapest|least expensive|most affordable|entry.?level|budget (option|model|one)|where does the range start|what does the range start at)\b/.test(
+    /\b(cheapest|cheaper|least expensive|less expensive|most affordable|more affordable|lower priced|entry.?level|budget (option|model|one)|where does the range start|what does the range start at)\b/.test(
       lower,
     )
   ) {
@@ -280,132 +561,157 @@ function findRankCriterion(lower: string): RankCriterion | undefined {
   return undefined;
 }
 
-function classify(lower: string, parsed: Understanding): Intent {
-  // Ordered by how unambiguous the signal is, so a sentence containing several
-  // cues resolves to the one the customer most likely meant. Plurals are
-  // spelled out rather than relied on: \b after "engine" does not match
-  // "engines", and a classifier that silently misses every plural sends half
-  // the questions a dealership gets down the wrong branch.
-  if (/\b(cancel\w*|can't make|cannot make|reschedul\w*)\b/.test(lower)) return 'cancel';
+/**
+ * One intent for one message.
+ *
+ * Ordered by how unambiguous the signal is, so a sentence containing several
+ * cues resolves to the one the customer most likely meant. The order is the
+ * design; each group says why it sits where it does.
+ *
+ * Plurals are spelled out rather than relied on: \b after "engine" does not
+ * match "engines", and a classifier that silently misses every plural sends
+ * half the questions a dealership gets down the wrong branch.
+ */
+function classify(lower: string, parsed: Understanding, vocabulary?: Vocabulary): Intent {
+  const named = parsed.modelSlugs.length;
+
+  // --- Before anything else: messages that must not be answered as asked ----
+  //
+  // A slur or an insult is never treated as a question, however much of one
+  // it also contains. Instructions to the assistant and requests for other
+  // people's details are answered the same way whatever else they say.
+  if (parsed.slur || parsed.insult) return 'abuse';
+  if (INJECTION.test(lower)) return 'injection';
+  if (PRIVACY.test(lower) || SOMEONE_ELSES_BOOKING.test(lower)) return 'privacy';
+
+  // --- A person, or a change to something already booked --------------------
+  if (/\b(cancel\w*|can'?t make( it)?|cannot make( it)?|reschedul\w*|move my (booking|appointment|test drive))\b/.test(lower)) {
+    return 'cancel';
+  }
   // Asking to be phoned is a callback; asking to speak to someone is a
   // handoff. Both are "I want a person", and the difference is only how.
-  if (/\b(call ?back|call me|ring me|phone me|give me a call)\b/.test(lower)) return 'callback';
-  if (/\b(speak to|talk to|salesperson|someone|a human|a person|advisor)\b/.test(lower)) {
-    return 'human';
-  }
+  if (/\b(call ?back|call me|ring me|phone me|give me a (call|ring))\b/.test(lower)) return 'callback';
+  if (COMPLAINT.test(lower)) return 'complaint';
+  // "Are you a real person?" is a question about the assistant, not a request
+  // for a person, and it has to be answered honestly.
+  if (WHO_ARE_YOU.test(lower)) return 'who_are_you';
+  if (HUMAN.test(lower)) return 'human';
   // Negotiation goes to a person. Quoting list price at someone asking for a
   // discount answers a question they did not ask, and no assistant here has
   // the authority to answer the one they did (spec §15).
   if (parsed.negotiating) return 'human';
-  if (/\b(servic\w*|repair\w*|maintenance|mot|oil change|recall|warranty|bodyshop|parts)\b/.test(lower)) {
-    return 'service';
-  }
+
+  // --- After-sales, and the pre-sale question that sounds like it -----------
+  if (SERVICE.test(lower)) return 'service';
+  if (WARRANTY.test(lower)) return 'warranty';
   if (parsed.tradeInInterest || /\bwhat(?:'?s| is) my .{0,40}\bworth\b/.test(lower)) {
     return 'trade_in';
   }
-  if (/\b(test drives?|drive it|come in and drive|book a drive|driving it)\b/.test(lower)) {
-    return 'test_drive';
-  }
+  if (TEST_DRIVE.test(lower)) return 'test_drive';
 
-  // A shape we do not build. Said before any search is attempted, because
-  // searching for a hatchback returns nothing and "nothing matches that"
-  // leaves the customer wondering whether they asked it wrong.
+  // --- What they want, before which car they want it in ---------------------
+  //
+  // A shape we do not build is said before any search is attempted: searching
+  // for a hatchback returns nothing, and "nothing matches that" leaves the
+  // customer wondering whether they asked it wrong.
   if (parsed.unbuiltBody) return 'body_not_built';
-
+  if (namesACompetitor(lower, vocabulary)) return 'competitor';
   // "Which trim is worth the money" is a question about one car's ladder, so it
   // is tested before the superlatives — every phrasing of it contains a price
   // word, and half of them contain "best".
-  if (
-    /\b(best value|value for money|worth (it|the extra|the money|the upgrade|the step)|worth (paying|going) up|which trim should|what do (i|you) get for the extra|bang for (your|the) buck)\b/.test(
-      lower,
-    )
-  ) {
-    return 'best_value';
+  if (BEST_VALUE.test(lower)) return 'best_value';
+  // A named piece of equipment. With a price word it is an options question,
+  // because an option is the thing with a price.
+  if (parsed.featureTerms.length > 0) {
+    return /\b(how much|price|cost|extra)\b/.test(lower) ? 'options' : 'feature_check';
   }
-
+  // "Does it come with a roof box?" is a yes-or-no question about one piece of
+  // kit, even when the kit is not one this knows by name. "What does it come
+  // with?" is a request for the list, and is left for 'features' below.
+  if (
+    /^(does|do|will|would|is|are|has|have|can) (it|they|this|that|the [\w-]+|[a-z]{1,3}\s?\d{1,3})? ?(come with|comes with|have|has|include|includes|get|got|offer|feature)\b/.test(lower) &&
+    !/^(does|do) .*\b(come with|have|include)\b\s*(\?|$)/.test(lower)
+  ) {
+    return 'feature_check';
+  }
   // A superlative with an axis behind it. The axis had to be recognised for
-  // this to fire, so there is always a real measure to rank on — "which is
-  // best" on its own is a different question and goes to 'recommend'.
-  if (parsed.rankCriterion) return 'rank';
-
+  // this to fire, so there is always a real measure to rank on.
+  if (parsed.rankCriterion && named < 2) return 'rank';
   // Open-ended, and the only honest reply is a question back. Never when they
   // have named two cars: that is a comparison and it has its own tool.
-  if (
-    parsed.modelSlugs.length < 2 &&
-    /\b(what should (i|we) (buy|get|go for|look at)|which (one )?(should|would) (i|you)|what do you recommend|any recommendations|recommend (me )?(one|a|something)|help me (choose|decide|pick)|(i'?m |im )?not sure what (i want|to get)|what would you (suggest|recommend|go for)|which is best for|best (car|one) for)\b/.test(
-      lower,
-    )
-  ) {
-    return 'recommend';
-  }
+  if (named < 2 && RECOMMEND.test(lower)) return 'recommend';
 
-  // How soon one can actually be had. Different from stock: the answer is "how
-  // long", and it comes from what is on the ground plus a person.
-  if (
-    /\b(how (long|soon)|lead time|waiting (list|time)|delivery time|when (can|could|would) (i|we) (get|have|take|collect)|how quickly can|order time|turnaround)\b/.test(
-      lower,
-    )
-  ) {
-    return 'delivery';
-  }
-
+  // --- Getting one, and how soon --------------------------------------------
+  if (HOME_DELIVERY.test(lower)) return 'home_delivery';
+  if (DELIVERY.test(lower) && !CHARGING.test(lower)) return 'delivery';
   // The whole range. Placed before the stock check because "what cars do you
-  // have" is asking what we build, not what is on the forecourt today.
+  // have" is asking what we build, not what is on the forecourt today — and
+  // with a budget or a shape attached it is a search, not the catalogue.
   if (
-    // "Range" needs a determiner in front of it. Bare, it is far more often an
-    // electric range question — "what sort of range does it do?" — and
-    // answering that with a list of every car we build is a non-sequitur.
-    /\b((what|which) (other |else )?(cars?|models?|vehicles?) (do|have|are|can)|what (else )?do you (make|sell|build|offer|do)|show me (the |your )?(range|lineup|line.?up|models?|cars?|everything)|(the|your|full|whole|entire) (range|lineup|line.?up)\b|all (of )?(your|the) (cars?|models?)|what'?s in the range|list (the |your )?(cars?|models?))/.test(
-      lower,
-    ) &&
-    parsed.modelSlugs.length === 0 &&
-    // With a budget or a shape attached it is a search, not a request for the
-    // whole catalogue: "what cars do you have under 50k" wants four, not ten.
+    RANGE.test(lower) &&
+    named === 0 &&
     !parsed.budgetCents &&
-    !parsed.bodyStyle &&
+    !(parsed.bodyStyle && !parsed.family) &&
     !parsed.electric &&
-    !parsed.seats
+    !parsed.hybrid
   ) {
     return 'range';
   }
+  if (CHARGING.test(lower)) return 'charging';
+
+  // --- Paying for it ----------------------------------------------------------
   if (parsed.financeInterest || /\b(per month|a month|each month)\b/.test(lower)) return 'finance';
+  if (PURCHASE.test(lower)) return 'purchase';
+  if (PROMOTIONS.test(lower)) return 'promotions';
+  if (PAYMENT.test(lower)) return 'payment';
+  if (INSURANCE.test(lower)) return 'insurance';
+  if (REGISTRATION.test(lower)) return 'registration';
+  if (USED.test(lower)) return 'used_cars';
+
+  // --- What is on the ground -------------------------------------------------
+  //
   // "Available" is the ambiguous one. "Do you have any S5s?" asks what is on
   // the forecourt; "what trims are available on the S5?" asks what the factory
   // builds, and answering that with a stock list is answering a different
   // question. So a message that names a part of the car — a trim, a colour, an
-  // engine, an option — is asking about the CATALOGUE, and only the unmistakably
-  // forecourt phrasings override that.
+  // engine, an option — is asking about the CATALOGUE, and only the
+  // unmistakably forecourt phrasings override that.
   const namesAFacet =
     /\b(trims?|versions?|grades?|levels?|colou?rs?|paint|engines?|motors?|powertrains?|drivetrains?|options?|packages?|features?|equipment|specs?|kit)\b/.test(
       lower,
     );
-  const onTheForecourt = /\b(in stock|on the lot|on the floor|ready to go|got any)\b/.test(lower);
+  const onTheForecourt = /\b(in stock|on the lot|on the floor|ready to go|got any|any left|on site|ready now)\b/.test(lower);
 
   if (onTheForecourt || (/\b(availab\w*|do you have)\b/.test(lower) && !namesAFacet)) {
     // "What SUVs do you have around 50k?" is a search worded as a stock
     // question. Without a named car there is nothing to check the lot for.
-    const searchable = parsed.bodyStyle || parsed.budgetCents || parsed.electric || parsed.seats;
-    if (parsed.modelSlugs.length > 0 || !searchable) return 'stock';
+    const searchable =
+      parsed.bodyStyle || parsed.budgetCents || parsed.electric || parsed.hybrid || parsed.seats;
+    if (named > 0 || !searchable) return 'stock';
   }
-  if (/\b(compare|versus| vs | v )\b|\bdifference between\b|\bwhich is better\b/.test(lower)) {
+  if (/\b(compare|comparison|versus| vs |vs\.| v |difference between|differences between|which is better)\b/.test(` ${lower} `)) {
     return 'compare';
   }
-  if (/\b(open|opening hours|what time|when are you)\b/.test(lower)) return 'hours';
+
+  // --- The dealership --------------------------------------------------------
+  if (HOURS.test(lower)) return 'hours';
   // "contact" only where it asks for ours. "Please contact me" is a customer
   // agreeing to be called, not a request for the showroom address.
-  if (
-    /\b(where are you|address|located|directions|phone number)\b/.test(lower) ||
-    /\b(how (can|do) (i|we) (contact|reach)|contact (details|number|info))\b/.test(lower)
-  ) {
-    return 'location';
-  }
-  if (/\b(colou?rs?|paint)\b/.test(lower)) return 'colours';
-  if (/\b(standard|equipment|features?|kit)\b/.test(lower)) return 'features';
-  if (/\b(options?|packages?|extras|add.?ons?)\b/.test(lower)) return 'options';
-  if (/\b(engines?|motors?|powertrains?|drivetrains?|range|batter(y|ies)|horsepower|hp|power|economy|mpg|litres?)\b/.test(lower)) {
+  if (LOCATION.test(lower) || CONTACT_US.test(lower)) return 'location';
+  if (named === 0 && (ABOUT_COMPANY.test(lower) || aboutTheBrand(lower, vocabulary))) return 'about_company';
+  if (CAREERS.test(lower)) return 'careers';
+  if (LANGUAGE.test(lower)) return 'language';
+  if (HOW_ARE_YOU.test(lower)) return 'how_are_you';
+
+  // --- One car, one aspect ---------------------------------------------------
+  if (/\b(colou?rs?|paint|shades?)\b/.test(lower)) return 'colours';
+  if (TRANSMISSION.test(lower)) return 'transmission';
+  if (/\b(options?|packages?|extras|add.?ons?|accessor(y|ies))\b/.test(lower)) return 'options';
+  if (/\b(standard|equipment|features?|kit|comes? with|what do (i|you) get|what'?s included|included)\b/.test(lower)) return 'features';
+  if (/\b(engines?|motors?|powertrains?|drivetrains?|range|batter(y|ies)|horsepower|hp|power|torque|economy|mpg|litres?|fuel|consumption)\b/.test(lower)) {
     return 'powertrains';
   }
-  if (/\b(trims?|versions?|grades?|levels?)\b/.test(lower)) return 'trims';
+  if (/\b(trims?|versions?|grades?|levels?|variants?)\b/.test(lower)) return 'trims';
 
   // A measurement question. The catalogue holds engines, trims, colours,
   // options and equipment — it does not hold boot volumes, kerb weights or
@@ -413,41 +719,74 @@ function classify(lower: string, parsed: Understanding): Intent {
   //
   // Recognising them anyway is the point. A question that is CLASSIFIED can be
   // answered with what we do know about that car plus a real route to the
-  // figure; a question that falls through to 'unknown' gets a shrug. The
-  // difference to the customer is the difference between a salesperson and a
-  // switchboard.
+  // figure; a question that falls through to 'unknown' gets a shrug.
   if (
-    /\b(boot|trunk|cargo|luggage|load space|legroom|headroom|dimensions?|length|width|height|wheelbase|ground clearance|weight|kerb weight|curb weight|tow\w*|payload|turning circle|tyre|tire|wheel size|0.?60|0.?100|zero to sixty|acceleration|top speed|safety rating|ncap|crash test)\b/.test(
+    /\b(boot|trunk|cargo|luggage|load space|legroom|headroom|dimensions?|length|width|height|wheelbase|ground clearance|weight|kerb weight|curb weight|tow\w*|payload|turning circle|tyres?|tires?|wheel size|0.?60|0.?100|zero to sixty|acceleration|top speed|safety rating|ncap|crash test|how many seats|seats)\b/.test(
       lower,
     )
   ) {
     return 'specs';
   }
-  if (/\b(how much|prices?|costs?|msrp|starting at|starts at)\b/.test(lower)) return 'price';
-  if (/\b(thanks|thank you|cheers|appreciate)\b/.test(lower)) return 'thanks';
-  if (/^\s*(hi|hello|hey|good (morning|afternoon|evening))\b/.test(lower)) return 'greeting';
+  if (/\b(how much|prices?|pricing|costs?|msrp|starting at|starts at|otr|on the road)\b/.test(lower)) return 'price';
+
+  // --- Small talk, once nothing substantive has claimed the message ---------
+  if (COMPLIMENT.test(lower)) return 'compliment';
+  if (GOODBYE.test(lower)) return 'goodbye';
+  if (THANKS.test(lower)) return 'thanks';
+  if (GREETING.test(lower)) return 'greeting';
+  if (parsed.short && ACKNOWLEDGE.test(lower.replace(/[^a-z' ]/g, '').trim())) return 'acknowledge';
 
   // A bare colour word routes here only once nothing stronger has claimed the
   // message, so "how much is the S5 in black" is still a price question.
-  if (namesAColour(lower) && parsed.modelSlugs.length > 0) return 'colours';
+  if (namesAColour(lower) && named > 0) return 'colours';
 
   // A budget is a search criterion only when they have not said which car.
   // "I want the S5 Premium and I have $55,000" is a configuration with a
   // budget attached, not a request to be shown the range under $55,000.
   if (
-    parsed.modelSlugs.length === 0 &&
-    (parsed.budgetCents || parsed.bodyStyle || parsed.electric || parsed.seats)
+    named === 0 &&
+    (parsed.budgetCents || parsed.bodyStyle || parsed.electric || parsed.hybrid || parsed.seats)
   ) {
     return 'search_vehicles';
   }
-  if (parsed.modelSlugs.length > 1) return 'compare';
+  if (named > 1) return 'compare';
 
   // Naming a car is not the same as asking something answerable about it.
-  // "Does the S5 tow a three horse trailer?" gets an honest "I do not know"
-  // rather than an overview that answers a question nobody asked.
-  if (parsed.modelSlugs.length === 1 && wantsOverview(lower)) return 'vehicle_overview';
+  // "Does the S5 tow a three horse trailer?" gets an honest route to the
+  // figure rather than an overview that answers a question nobody asked.
+  if (named === 1 && wantsOverview(lower)) return 'vehicle_overview';
 
   return 'unknown';
+}
+
+/**
+ * A question about another manufacturer. Never this dealership's own brand.
+ *
+ * Naming a brand is not enough. "2019 Toyota Camry, 80,000 km" is a customer
+ * describing the car they want to trade in — an answer to our own question —
+ * and treating it as a question about a competitor derailed the appraisal.
+ * It takes a brand AND a reason to think they are asking about it: a
+ * comparison, or whether we sell one.
+ */
+function namesACompetitor(lower: string, vocabulary?: Vocabulary): boolean {
+  const own = vocabulary?.brand?.toLowerCase();
+  const brand = COMPETITOR_BRANDS.some(
+    (name) => name !== own && new RegExp(`\\b${name}s?\\b`).test(lower),
+  );
+  return (
+    brand &&
+    /\b(vs|versus|compar\w*|better|worse|than|similar|sell|carry|stock|have any|do you (do|have|sell)|dealer\w*|instead of|against|or a|or the)\b/.test(
+      lower,
+    )
+  );
+}
+
+/** "Tell me about Sinclair" — the brand, with no car named after it. */
+function aboutTheBrand(lower: string, vocabulary?: Vocabulary): boolean {
+  const brand = vocabulary?.brand?.toLowerCase();
+  if (!brand) return false;
+  const escaped = brand.replace(/[.*+?^${}()|[\]\\]/g, (m) => `\\${m}`);
+  return new RegExp(`\\b(about|who (is|are)|what is|what's) ${escaped}\\b`).test(lower);
 }
 
 /**
@@ -467,7 +806,7 @@ function isNegotiating(lower: string): boolean {
 
 function wantsOverview(lower: string): boolean {
   if (
-    /\b(tell me about|about the|what'?s the|what is the|overview|interested in|looking at|show me|more on|details on|i want|i'?d like|i am after|thinking about|considering)\b/.test(
+    /\b(tell me about|about the|what'?s the|what is the|overview|interested in|looking at|show me|more on|details on|i want|i'?d like|i am after|thinking about|considering|any good|is it good|good for|suitable for|worth (it|buying)|how is the|what'?s it like|what is it like|info on|information on|describe|explain)\b/.test(
       lower,
     )
   ) {
@@ -494,7 +833,10 @@ function findModels(lower: string, vocabulary?: Vocabulary): string[] {
     if (words.length > 1) aliases.add(words.slice(1).join(' ').toLowerCase());
 
     const matched = [...aliases].some((alias) => {
-      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escaped = alias
+        .replace(/[.*+?^${}()|[\]\\]/g, (char) => `\\${char}`)
+        // "S 5", "s-5" and "S5" are the same car; people type all three.
+        .replace(/([a-z])(\d)/g, (_, letter: string, digit: string) => `${letter}[\\s-]?${digit}`);
       // The optional plural is not cosmetic: "do you have any S5s in stock" is
       // how the question is actually asked. Word-boundary matched so a
       // single-letter model does not fire on every stray letter.
@@ -575,6 +917,22 @@ function plausible(value: number): boolean {
  * A date and a price are both digits and separators too; ten to fifteen digits
  * is what tells them apart.
  */
+/**
+ * A phone number given in direct reply to a request for one.
+ *
+ * Looser than findPhone on purpose, and used ONLY when the assistant has just
+ * asked for a number. A Brunei number is seven digits, which in free text is
+ * as likely to be a stock number or a price; straight after "what's the best
+ * number to reach you on?" it is a phone number.
+ */
+export function phoneFromReply(text: string): string | undefined {
+  const withoutEmail = text.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, ' ');
+  const match = /(\+?\d[\d\s().-]{5,}\d)/.exec(withoutEmail);
+  if (!match) return undefined;
+  const digits = match[1]!.replace(/\D/g, '').length;
+  return digits >= 7 && digits <= 15 ? match[1]!.trim() : undefined;
+}
+
 function findPhone(text: string): string | undefined {
   const match = /(\+?\d[\d\s().-]{7,}\d)/.exec(text);
   if (!match) return undefined;

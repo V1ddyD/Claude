@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { and, eq, lte, inArray, asc, sql } from 'drizzle-orm';
+import { and, eq, inArray, asc, sql } from 'drizzle-orm';
 import { defineTool } from '../define';
 import {
   vehicleModels, modelConfigurations, powertrains, trims, colours, inventoryUnits,
@@ -36,7 +36,18 @@ export const searchVehicles = defineTool({
       eq(vehicleModels.status, 'published'),
     ];
     if (input.bodyStyle) conditions.push(eq(vehicleModels.bodyStyle, input.bodyStyle));
-    if (input.maxPriceCents) conditions.push(lte(vehicleModels.baseMsrpCents, input.maxPriceCents));
+    // Filtered on the cheapest car that can actually be ordered, not the
+    // headline MSRP, which can name a combination nobody builds. Otherwise a
+    // search under $55,000 lists a car whose cheapest real version is $56,400.
+    if (input.maxPriceCents) {
+      conditions.push(
+        sql`EXISTS (
+          SELECT 1 FROM ${modelConfigurations} mc
+          WHERE mc.model_id = ${vehicleModels.id}
+            AND mc.price_cents <= ${input.maxPriceCents}
+        )`,
+      );
+    }
 
     if (input.powertrainKind || input.drivetrain) {
       const ptConditions = [eq(powertrains.tenantId, ctx.tenantId)];
@@ -53,12 +64,34 @@ export const searchVehicles = defineTool({
       );
     }
 
-    return ctx.db
+    const models = await ctx.db
       .select()
       .from(vehicleModels)
       .where(and(...conditions))
       .orderBy(asc(vehicleModels.displayOrder))
       .limit(6);
+
+    if (models.length === 0) return models;
+
+    // The same "from" price every other answer quotes: the cheapest
+    // configuration, so a search result never disagrees with the car's page.
+    const floors = await ctx.db
+      .select({
+        modelId: modelConfigurations.modelId,
+        from: sql<number>`min(${modelConfigurations.priceCents})::bigint`,
+      })
+      .from(modelConfigurations)
+      .where(
+        and(
+          eq(modelConfigurations.tenantId, ctx.tenantId),
+          inArray(modelConfigurations.modelId, models.map((m) => m.id)),
+        ),
+      )
+      .groupBy(modelConfigurations.modelId)
+      .limit(6);
+
+    const floor = new Map(floors.map((row) => [row.modelId, Number(row.from)]));
+    return models.map((m) => ({ ...m, baseMsrpCents: floor.get(m.id) ?? m.baseMsrpCents }));
   },
   project: (models, ctx) => ({
     count: models.length,
@@ -76,10 +109,24 @@ export const getVehicle = defineTool({
   handler: async (ctx, input) => {
     const model = await catalogue.getModelBySlug(ctx.db, input.modelSlug);
     if (!model) throw notFound('That model');
-    const configurations = await catalogue.listConfigurations(ctx.db, model.id);
-    return { model, configurations };
+
+    // Independent reads, issued together: the matrix, the palette sizes and
+    // what is on the ground. Everything a first answer about a car should be
+    // able to say without a second question.
+    const [configurations, palette, inStock] = await Promise.all([
+      catalogue.listConfigurations(ctx.db, model.id),
+      ctx.db
+        .select({ kind: colours.kind, count: sql<number>`count(*)::int` })
+        .from(colours)
+        .where(and(eq(colours.tenantId, ctx.tenantId), eq(colours.modelId, model.id)))
+        .groupBy(colours.kind)
+        // Two kinds exist; the cap is the invariant every tool query keeps.
+        .limit(2),
+      catalogue.countAvailableUnits(ctx.db, model.id),
+    ]);
+    return { model, configurations, palette, inStock };
   },
-  project: ({ model, configurations }, ctx) => ({
+  project: ({ model, configurations, palette, inStock }, ctx) => ({
     ...projectModelSummary(model, ctx.tenant),
     // The cheapest car you can actually order, not the headline MSRP.
     //
@@ -97,11 +144,74 @@ export const getVehicle = defineTool({
           ),
         }
       : {}),
+    ...(configurations.length > 0
+      ? {
+          priceTo: money(Math.max(...configurations.map((c) => c.priceCents)), ctx.tenant),
+        }
+      : {}),
     overview: model.overview,
+    modelYear: model.modelYear,
     powertrains: [...new Set(configurations.map((c) => c.powertrainName))],
     trims: [...new Set(configurations.map((c) => c.trimName))],
+    ...summariseRange(configurations, ctx.tenant),
+    colourCounts: {
+      exterior: palette.find((row) => row.kind === 'exterior')?.count ?? 0,
+      interior: palette.find((row) => row.kind === 'interior')?.count ?? 0,
+    },
+    // How many are on the ground now. A count, not a promise: the stock tool
+    // is what names an actual car.
+    inStock,
   }),
 });
+
+/**
+ * The shape of a model's range, as a customer would summarise it.
+ *
+ * Every figure is a minimum or maximum over rows the dealership entered; a
+ * field with no data in any row comes back null rather than zero, so the
+ * assistant says nothing about it instead of saying something false.
+ */
+function summariseRange(
+  configurations: Awaited<ReturnType<typeof catalogue.listConfigurations>>,
+  tenant: { currency: string; locale: string },
+) {
+  const engines = new Map<string, (typeof configurations)[number]>();
+  for (const c of configurations) if (!engines.has(c.powertrainCode)) engines.set(c.powertrainCode, c);
+  const rows = [...engines.values()];
+
+  const power = rows.map((r) => r.horsepower ?? 0).filter((hp) => hp > 0);
+  const fuel = rows
+    .map((r) => Number(r.consumptionL100))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const range = rows.map((r) => r.rangeKm ?? 0).filter((km) => km > 0);
+
+  const trims = new Map<string, { name: string; fromCents: number; summary: string | null }>();
+  for (const c of configurations) {
+    const seen = trims.get(c.trimCode);
+    if (!seen || c.priceCents < seen.fromCents) {
+      trims.set(c.trimCode, { name: c.trimName, fromCents: c.priceCents, summary: c.trimSummary });
+    }
+  }
+
+  return {
+    horsepower: power.length ? { min: Math.min(...power), max: Math.max(...power) } : null,
+    drivetrains: [...new Set(rows.map((r) => r.drivetrain.toUpperCase()))],
+    powertrainKinds: [...new Set(rows.map((r) => r.powertrainKind))],
+    transmissions: [...new Set(rows.map((r) => r.transmission).filter((t): t is string => Boolean(t)))],
+    bestFuelL100: fuel.length ? Math.min(...fuel) : null,
+    bestElectricRangeKm: range.length ? Math.max(...range) : null,
+    engines: rows.map((r) => ({
+      name: r.powertrainName,
+      type: r.powertrainKind,
+      horsepower: r.horsepower,
+    })),
+    trimDetails: [...trims.values()].map((trim) => ({
+      name: trim.name,
+      priceFrom: money(trim.fromCents, tenant),
+      summary: trim.summary,
+    })),
+  };
+}
 
 export const getVehiclePowertrains = defineTool({
   name: 'getVehiclePowertrains',
@@ -298,7 +408,7 @@ export const checkInventory = defineTool({
         )
       : new Map();
 
-    return rows
+    const units = rows
       .filter(
         (r) =>
           !input.exteriorColourCode ||
@@ -309,9 +419,30 @@ export const checkInventory = defineTool({
         exteriorColour: colourNames.get(r.exteriorColourId ?? '')?.name ?? null,
         interiorColour: colourNames.get(r.interiorColourId ?? '')?.name ?? null,
       }));
+
+    // Only five cars are ever returned, so "5 here now" was wrong for any
+    // model with more. The total is counted separately so the headline is
+    // true even when the list is a sample. Not counted when a colour filter
+    // applies after the fact: the list is the whole answer then.
+    const total = input.exteriorColourCode
+      ? units.length
+      : Number(
+          (
+            await ctx.db
+              .select({ count: sql<number>`count(*)::int` })
+              .from(inventoryUnits)
+              .innerJoin(modelConfigurations, eq(modelConfigurations.id, inventoryUnits.modelConfigurationId))
+              .innerJoin(vehicleModels, eq(vehicleModels.id, modelConfigurations.modelId))
+              .innerJoin(trims, eq(trims.id, modelConfigurations.trimId))
+              .where(and(...conditions))
+          )[0]?.count ?? units.length,
+        );
+
+    return { units, total: Math.max(total, units.length) };
   },
-  project: (units, ctx) => ({
+  project: ({ units, total }, ctx) => ({
     count: units.length,
+    total,
     available: units.map((u) => ({
       ...projectInventoryUnit(u, ctx.tenant, ctx.now),
       trim: u.trimName,

@@ -128,6 +128,7 @@ describe('a completed action', () => {
               modelSlug: 's5',
               fullName: 'Stream Test',
               email: `stream.${Date.now()}@example.test`,
+              phone: '+1 416 555 0100',
               contactConsent: true,
             },
           }],

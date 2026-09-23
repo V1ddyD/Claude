@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from '../define';
 import { createTestDrive } from '@/server/services/booking';
-import { resolveCustomer, applySignals, upsertLead } from '@/server/services/leads';
+import { applySignals, identifyConversationCustomer } from '@/server/services/leads';
 import { AppError } from '@/server/errors';
 
 /**
@@ -17,14 +17,18 @@ export const createTestDriveTool = defineTool({
   scope: 'write',
   summary:
     'Book a test drive at a time returned by getAvailableTestDriveSlots. Requires the ' +
-    'customer\'s name and email, and their agreement to be contacted. Only call this ' +
-    'once the customer has confirmed the specific time.',
+    'customer\'s name, email and phone number, and their agreement to be contacted. ' +
+    'Only call this once the customer has confirmed the specific time.',
   input: z.object({
     startsAt: z.string().datetime(),
     modelSlug: z.string().max(40).optional(),
     fullName: z.string().min(1).max(120),
     email: z.string().email(),
-    phone: z.string().max(40).optional(),
+    // Required for a test drive. A booking is the one request where the
+    // dealership may genuinely need to reach somebody in the next hour — a car
+    // is not ready, a specialist is off sick — and an email sent at 9am about
+    // a 10am drive is not a way to reach anyone.
+    phone: z.string().min(7).max(40),
     /** Must be explicit: the customer has to have agreed to be contacted. */
     contactConsent: z.literal(true),
     notes: z.string().max(500).optional(),
@@ -41,27 +45,26 @@ export const createTestDriveTool = defineTool({
       throw new AppError('VALIDATION_FAILED', 'That time is in the past.');
     }
 
-    const customerId = await resolveCustomer(ctx.db, {
+    // The conversation's own customer, filled in — not a second one. See
+    // identifyConversationCustomer for why that distinction reached the portal.
+    const identified = await identifyConversationCustomer(ctx.db, ctx.conversationId, {
       fullName: input.fullName,
       email: input.email,
-      phone: input.phone ?? null,
+      phone: input.phone,
       contactConsent: input.contactConsent,
     });
-    if (!customerId) throw new AppError('VALIDATION_FAILED', 'Contact details are required.');
+    if (!identified) throw new AppError('VALIDATION_FAILED', 'Contact details are required.');
+    const { customerId, leadId } = identified;
 
     // Identity is evidence too, and it is evidence the system observed rather
     // than inferred, so it is recorded at full confidence.
-    const leadId = await upsertLead(ctx.db, {
-      conversationId: ctx.conversationId,
-      customerId,
-    });
     await applySignals(
       ctx.db,
       leadId,
       {
         customerName: { value: input.fullName, confidence: 1 },
         customerEmail: { value: input.email, confidence: 1 },
-        ...(input.phone ? { customerPhone: { value: input.phone, confidence: 1 } } : {}),
+        customerPhone: { value: input.phone, confidence: 1 },
         ...(input.modelSlug ? { modelSlug: { value: input.modelSlug, confidence: 1 } } : {}),
       },
       { source: 'form' },

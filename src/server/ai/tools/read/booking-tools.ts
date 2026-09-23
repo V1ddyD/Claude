@@ -3,6 +3,33 @@ import { defineTool } from '../define';
 import { getAvailableTestDriveSlots, formatSlot } from '@/server/services/booking';
 import { AppError } from '@/server/errors';
 
+/**
+ * A sample of the diary that covers the range asked for.
+ *
+ * The first twelve slots of a fortnight are one day and a half, so "this
+ * weekend" was never in them and a customer who works Wednesdays was offered
+ * nothing but Wednesdays. The cap is now per day, sized so a short range shows
+ * most of its times and a long one still reaches its last week.
+ */
+function spreadAcrossDays<T extends { startsAt: Date }>(slots: T[], timezone: string): T[] {
+  const dayOf = (slot: T) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(slot.startsAt);
+  const days = new Set(slots.map(dayOf)).size || 1;
+  const perDay = Math.max(3, Math.ceil(15 / days));
+
+  const counts = new Map<string, number>();
+  const picked: T[] = [];
+  for (const slot of slots) {
+    const day = dayOf(slot);
+    const used = counts.get(day) ?? 0;
+    if (used >= perDay) continue;
+    counts.set(day, used + 1);
+    picked.push(slot);
+    if (picked.length === 15) break;
+  }
+  return picked;
+}
+
 export const getAvailableTestDriveSlots_tool = defineTool({
   name: 'getAvailableTestDriveSlots',
   scope: 'read',
@@ -31,7 +58,7 @@ export const getAvailableTestDriveSlots_tool = defineTool({
     const slots = await getAvailableTestDriveSlots(ctx.db, ctx.tenant, {
       from, to: capped, now: ctx.now, modelSlug: input.modelSlug,
     });
-    return slots.slice(0, 12);
+    return spreadAcrossDays(slots, ctx.tenant.timezone);
   },
   project: (slots, ctx) => ({
     count: slots.length,

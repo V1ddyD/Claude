@@ -141,7 +141,7 @@ describe('the demonstration scenario', () => {
             input: {
               startsAt: slots[0]!.startsAt.toISOString(),
               modelSlug: 's5', fullName: 'Alex Morgan',
-              email: 'alex.morgan@example.test', contactConsent: true,
+              email: 'alex.morgan@example.test', phone: '+1 416 555 0100', contactConsent: true,
             },
           }],
         },

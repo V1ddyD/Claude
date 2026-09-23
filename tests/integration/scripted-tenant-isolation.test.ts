@@ -105,7 +105,7 @@ describe('inventory belonging to the other dealership', () => {
       WHERE tenant_id = ${SINCLAIR_TENANT_ID} AND status = 'available'
     `;
     expect(sinclair!.count).toBeGreaterThan(0);
-    expect(reply.text).toMatch(/nothing matching|none of those|nothing like that/i);
+    expect(reply.text).toMatch(/nothing matching|none of those|nothing like that|don't have one on site/i);
     expect(reply.text).not.toMatch(/SIN-\d/);
   });
 });
