@@ -8,6 +8,7 @@ import { changeStatusAction, assignLeadAction, addNoteAction } from './actions';
 import { PriorityBadge } from '@/components/portal/priority-badge';
 import { RichText } from '@/components/rich-text';
 import { formatMoney } from '@/server/services/pricing';
+import { getTenantById, type ResolvedTenant } from '@/server/context/tenant';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Lead' };
@@ -30,10 +31,11 @@ export default async function LeadPage({
   const { id } = await params;
   const { error } = await searchParams;
 
-  const { detail, staff, colleagues } = await withStaff(
+  const { detail, staff, colleagues, tenantId } = await withStaff(
     'lead.read.assigned',
     async (db, currentStaff) => ({
       detail: await getLeadDetail(db, currentStaff, id),
+      tenantId: currentStaff.tenantId,
       staff: {
         role: currentStaff.role,
         canAssign: currentStaff.can('lead.assign'),
@@ -53,6 +55,8 @@ export default async function LeadPage({
   // A lead outside this staff member's visibility is "not found", not
   // "forbidden": distinguishing them confirms the record exists.
   if (!detail) notFound();
+  // Times and money in the dealership's own zone and currency.
+  const tenant = await getTenantById(tenantId);
 
   const { lead, customer, signals, timeline, transcript, appointments, tickets, notes } = detail;
   const nextStatuses = allowedNextStatuses(lead.status);
@@ -212,7 +216,7 @@ export default async function LeadPage({
             <div key={signal.field} className="flex items-baseline justify-between gap-3 py-1">
               <span className="text-xs text-ink-500">{humanise(signal.field)}</span>
               <span className="text-right text-sm text-ink-900">
-                {formatValue(signal.field, signal.value)}
+                {formatValue(signal.field, signal.value, tenant)}
                 {/* Confidence and provenance, so staff can tell a stated fact
                     from an inferred one (spec §26). */}
                 <span className="ml-2 text-[11px] text-ink-300">
@@ -228,8 +232,8 @@ export default async function LeadPage({
             {appointments.map((appointment) => (
               <div key={appointment.id} className="py-1 text-sm">
                 <span className="text-ink-900">
-                  {new Intl.DateTimeFormat('en-CA', {
-                    timeZone: 'America/Toronto',
+                  {new Intl.DateTimeFormat(tenant.locale, {
+                    timeZone: tenant.timezone,
                     dateStyle: 'medium',
                     timeStyle: 'short',
                   }).format(appointment.startsAt)}
@@ -260,9 +264,11 @@ export default async function LeadPage({
               <p className="text-sm text-ink-900">{event.summary}</p>
               <p className="text-[11px] text-ink-500">
                 {event.actorType} ·{' '}
-                {new Intl.DateTimeFormat('en-CA', { dateStyle: 'medium', timeStyle: 'short' }).format(
-                  event.createdAt,
-                )}
+                {new Intl.DateTimeFormat(tenant.locale, {
+                  timeZone: tenant.timezone,
+                  dateStyle: 'medium',
+                  timeStyle: 'short',
+                }).format(event.createdAt)}
               </p>
             </div>
           ))}
@@ -391,9 +397,9 @@ function humanise(field: string): string {
   );
 }
 
-function formatValue(field: string, value: unknown): string {
+function formatValue(field: string, value: unknown, tenant: ResolvedTenant): string {
   if (field === 'budgetCents' && typeof value === 'number') {
-    return formatMoney(value, 'CAD', 'en-CA');
+    return formatMoney(value, tenant.currency, tenant.locale);
   }
   // A model arrives as the slug the catalogue accepted. Staff call it the S5.
   if (field === 'modelSlug' && typeof value === 'string') return value.toUpperCase();

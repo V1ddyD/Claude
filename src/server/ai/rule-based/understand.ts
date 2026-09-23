@@ -1134,15 +1134,24 @@ const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 
  * the words their answer has to agree with.
  */
 export function saidMatchesSlot(label: string, said: string): boolean {
-  // Intl puts a narrow no-break space between the time and a.m./p.m.
-  const shown = label.toLowerCase().replace(/\./g, '').replace(/[  ]/g, ' ');
+  // Labels read "at 10am"; older ones, still in stored conversations, read
+  // "at 10:00 a.m. EDT". Both come out as "at 10am" or "at 10:00 am".
+  const shown = label.toLowerCase().replace(/\./g, '').replace(/[\u202f\u00a0]/g, ' ');
   const text = said.toLowerCase().replace(/\./g, '');
 
   const day = DAYS.find((name) => text.includes(name));
   if (day && !shown.includes(day)) return false;
 
   const time = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/.exec(text);
-  if (time) return shown.includes(`${Number(time[1])}:${time[2] ?? '00'} ${time[3]}`);
+  if (time) {
+    const at = /\bat (\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/.exec(shown);
+    return Boolean(
+      at &&
+        Number(at[1]) === Number(time[1]) &&
+        (at[2] ?? '00') === (time[2] ?? '00') &&
+        at[3] === time[3],
+    );
+  }
 
   const iso = /\b(\d{4}-\d{2}-\d{2})\b/.exec(text);
   if (iso) return label.includes(iso[1]!);

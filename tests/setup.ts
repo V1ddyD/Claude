@@ -17,3 +17,22 @@ if (existsSync(file)) {
 if (!process.env.NODE_ENV) {
   Object.assign(process.env, { NODE_ENV: 'test' });
 }
+
+/**
+ * Email delivery, as a configured deployment has it.
+ *
+ * Without a provider the assistant rightly never mentions a confirmation
+ * email, so most tests would stop seeing the wording they assert. A stand-in
+ * that accepts everything keeps the default case the configured one; the
+ * email tests install their own recorder, and the unconfigured case is
+ * tested by resetting to null.
+ */
+const { setEmailProvider } = await import('../src/server/services/email/provider');
+let sent = 0;
+setEmailProvider({
+  name: 'test-default',
+  async send() {
+    sent++;
+    return { accepted: true, providerMessageId: `test-${sent}` };
+  },
+});

@@ -44,7 +44,7 @@ export default async function AppointmentsPage() {
   const tenant = await getTenantById(tenantId);
 
   const byDay = rows.reduce<Record<string, typeof rows>>((groups, appointment) => {
-    const day = new Intl.DateTimeFormat('en-CA', {
+    const day = new Intl.DateTimeFormat(tenant.locale, {
       timeZone: tenant.timezone,
       dateStyle: 'full',
     }).format(appointment.startsAt);

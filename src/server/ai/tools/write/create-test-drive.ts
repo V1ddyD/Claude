@@ -3,6 +3,7 @@ import { defineTool } from '../define';
 import { createTestDrive } from '@/server/services/booking';
 import { applySignals, identifyConversationCustomer } from '@/server/services/leads';
 import { AppError } from '@/server/errors';
+import { canDeliverEmail } from '@/server/services/email/provider';
 
 /**
  * The only write tool in the walking skeleton.
@@ -84,9 +85,12 @@ export const createTestDriveTool = defineTool({
     confirmationCode: result.confirmationCode,
     vehicle: result.vehicle,
     when: result.formattedWhen,
-    // Queued, not sent. The assistant must not claim delivery (spec §21, §54).
-    confirmationEmail: result.confirmationEmailQueued
-      ? 'queued — it will arrive shortly'
-      : 'not sent: no email address on file, or contact consent not given',
+    // Queued, not sent. The assistant must not claim delivery (spec §21, §54),
+    // and must not mention an email at all when nothing can deliver one.
+    confirmationEmail: !result.confirmationEmailQueued
+      ? 'not sent: no email address on file, or contact consent not given'
+      : canDeliverEmail()
+        ? 'queued — it will arrive shortly'
+        : 'not sent: email is not set up for this dealership; do not mention an email',
   }),
 });

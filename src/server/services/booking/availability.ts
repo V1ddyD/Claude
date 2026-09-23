@@ -156,11 +156,31 @@ export function computeAvailableSlots(request: SlotRequest): Slot[] {
 
 /** Slot offers always carry an absolute local date (docs/04-spec-review.md §5). */
 export function formatSlot(slot: Slot, timezone: string, locale: string): string {
-  return new Intl.DateTimeFormat(locale, {
+  // The date in the dealership's own order ("Saturday 26 September 2026" in
+  // Brunei, "Saturday, September 26, 2026" in Canada), always in English:
+  // the assistant speaks English, and the weekday is what it matches on.
+  const dateLocale = locale.toLowerCase().startsWith('en') ? locale : 'en-GB';
+  const date = new Intl.DateTimeFormat(dateLocale, {
     timeZone: timezone,
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
   }).format(slot.startsAt);
+  return `${date} at ${clockTime(slot.startsAt, timezone)}`;
+}
+
+/**
+ * "10am", "2:30pm": a time as a person writes it.
+ *
+ * No time zone name. Every customer is booking at the dealership they are
+ * talking to, in its own time, and "GMT+8" on a test drive reads like a
+ * flight.
+ */
+function clockTime(at: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, hour: 'numeric', minute: '2-digit', hour12: true,
+  }).formatToParts(at);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? '';
+  const minute = part('minute');
+  return `${part('hour')}${minute === '00' ? '' : `:${minute}`}${part('dayPeriod').toLowerCase()}`;
 }
 
 export type { Cents };

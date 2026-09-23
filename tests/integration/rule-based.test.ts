@@ -68,8 +68,8 @@ describe('the rule-based assistant', () => {
     const price = await chat.say('How much is the S5 Premium?');
     expect(price.toolsUsed).toContain('calculateVehiclePrice');
     // A total, stated as one, from the pricing engine.
-    expect(price.text).toMatch(/comes to \*\*\$[\d,]+\*\*/);
-    expect(price.text).toMatch(/Excludes taxes/i);
+    expect(price.text).toMatch(/comes to \*\*B?\$[\d,]+\*\*/);
+    expect(price.text).toMatch(/registration and insurance are extra/i);
   });
 
   it('only offers a colour or a car the catalogue actually has', async () => {
@@ -306,7 +306,7 @@ describe('the rule-based assistant', () => {
     expect(estimate.text).toMatch(/a month/i);
     expect(estimate.text).toMatch(/estimate/i);
     // Says outright what it is not, rather than leaving it to be assumed.
-    expect(estimate.text).toMatch(/not an offer of credit/i);
-    expect(estimate.text).toMatch(/not a guarantee of approval/i);
+    expect(estimate.text).toMatch(/not an offer of (credit|financing)/i);
+    expect(estimate.text).toMatch(/guarantee of approval/i);
   });
 });

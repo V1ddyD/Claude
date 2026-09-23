@@ -181,12 +181,24 @@ describe('timezone correctness', () => {
     expect(before[0]!.startsAt.getUTCHours()).not.toBe(after[0]!.startsAt.getUTCHours());
   });
 
-  it('formats an offer with an absolute date and zone, never a bare weekday', () => {
+  it('formats an offer with an absolute date, never a bare weekday', () => {
     const slots = computeAvailableSlots(request());
     const text = formatSlot(slots[0]!, TZ, 'en-CA');
     expect(text).toMatch(/Friday/);
     expect(text).toMatch(/September/);
     expect(text).toMatch(/2026/);
-    expect(text).toMatch(/E[DS]T/);
+    // A time as a person writes it, in the dealership's own time. No zone
+    // name: every customer is booking at the dealership they are talking to.
+    expect(text).toMatch(/ at \d{1,2}(:\d{2})?[ap]m$/);
+    expect(text).not.toMatch(/E[DS]T|GMT/);
+  });
+
+  it("writes the date the way the dealership's country does", () => {
+    const slots = computeAvailableSlots(request());
+    expect(formatSlot(slots[0]!, TZ, 'en-GB')).toMatch(/^Friday,? 18 September 2026 at /);
+    expect(formatSlot(slots[0]!, TZ, 'en-CA')).toMatch(/^Friday, September 18, 2026 at /);
+    // A locale the assistant does not speak still gets English weekdays: the
+    // weekday is what a customer's "Saturday" is matched against.
+    expect(formatSlot(slots[0]!, TZ, 'ms-BN')).toMatch(/^Friday/);
   });
 });

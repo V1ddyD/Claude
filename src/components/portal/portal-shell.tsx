@@ -54,7 +54,12 @@ export function PortalShell({
   return (
     <div className="min-h-screen bg-ink-50">
       <header className="border-b border-ink-100 bg-white">
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-8 px-6">
+        {/*
+          On a phone the links drop to their own row and scroll sideways, so the
+          header never makes the page wider than the screen. Most of a
+          salesperson's day with this is on a phone between customers.
+        */}
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-8 gap-y-2 px-4 pt-3 sm:px-6 md:h-14 md:flex-nowrap md:pt-0">
           <Link href="/portal" className="text-sm font-medium tracking-[0.2em] text-ink-900">
             {brandName.toUpperCase()}
           </Link>
@@ -62,26 +67,27 @@ export function PortalShell({
             Dealer Portal
           </span>
 
-          <nav className="ml-auto flex items-center gap-5">
+          <span className="ml-auto text-right leading-tight md:order-last md:ml-0 md:border-l md:border-ink-100 md:pl-5">
+            <span className="block text-sm text-ink-900">{staff.fullName}</span>
+            <span className="block text-[11px] uppercase tracking-wider text-ink-500">
+              {ROLE_LABEL[staff.role] ?? staff.role}
+            </span>
+          </span>
+
+          <nav className="order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-5 overflow-x-auto px-4 pb-3 sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-6 md:order-none md:mx-0 md:ml-auto md:w-auto md:overflow-visible md:px-0 md:pb-0">
             {visible.map((item) => (
               <Link
                 key={item.label}
                 href={item.href}
-                className="text-sm text-ink-900 transition-colors hover:text-accent-500"
+                className="whitespace-nowrap text-sm text-ink-900 transition-colors hover:text-accent-500"
               >
                 {item.label}
               </Link>
             ))}
-            <span className="border-l border-ink-100 pl-5 text-right leading-tight">
-              <span className="block text-sm text-ink-900">{staff.fullName}</span>
-              <span className="block text-[11px] uppercase tracking-wider text-ink-500">
-                {ROLE_LABEL[staff.role] ?? staff.role}
-              </span>
-            </span>
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-7xl px-6 py-10">{children}</main>
+      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">{children}</main>
     </div>
   );
 }

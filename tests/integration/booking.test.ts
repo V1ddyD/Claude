@@ -111,9 +111,10 @@ describe('booking a test drive', () => {
 
     expect(result.ticketNumber).toMatch(/^SIN-\d{4}-\d+$/);
     expect(result.confirmationCode).toHaveLength(6);
-    // An absolute local date with a zone, never a bare weekday.
+    // An absolute local date, never a bare weekday, and a time as a person
+    // writes it.
     expect(result.formattedWhen).toMatch(/\d{4}/);
-    expect(result.formattedWhen).toMatch(/E[DS]T/);
+    expect(result.formattedWhen).toMatch(/ at \d{1,2}(:\d{2})?[ap]m$/);
 
     const [ticket] = await admin<{ number: string; lead_id: string }[]>`
       SELECT number, lead_id FROM tickets WHERE appointment_id = ${result.appointmentId}

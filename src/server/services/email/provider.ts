@@ -27,6 +27,13 @@ export type SendResult =
 
 export interface EmailProvider {
   readonly name: string;
+  /**
+   * False when nothing can be delivered at all. Absent means it can.
+   *
+   * A confirmation queued with no provider behind it never arrives, so a
+   * customer must not be told one is on its way.
+   */
+  readonly canDeliver?: boolean;
   send(email: OutgoingEmail): Promise<SendResult>;
 }
 
@@ -89,6 +96,7 @@ class ResendProvider implements EmailProvider {
  */
 class UnconfiguredProvider implements EmailProvider {
   readonly name = 'unconfigured';
+  readonly canDeliver = false;
 
   async send(): Promise<SendResult> {
     return { accepted: false, error: 'No email provider is configured', retryable: true };
@@ -100,6 +108,11 @@ let provider: EmailProvider | undefined;
 export function emailProvider(): EmailProvider {
   provider ??= features.email ? new ResendProvider(env.RESEND_API_KEY!) : new UnconfiguredProvider();
   return provider;
+}
+
+/** Whether a queued email will actually be sent. */
+export function canDeliverEmail(): boolean {
+  return emailProvider().canDeliver !== false;
 }
 
 /** Test seam. */

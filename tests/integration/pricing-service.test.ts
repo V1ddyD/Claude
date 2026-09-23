@@ -55,7 +55,8 @@ describe('the catalogue through the service layer', () => {
 
     // 52,900 base + 3,500 powertrain + 2,500 trim, Obsidian at no cost.
     expect(quote.totalCents).toBe(5_890_000);
-    expect(quote.totalFormatted).toBe('$58,900');
+    // Brunei dollars, written as Brunei writes them.
+    expect(quote.totalFormatted).toBe('B$58,900');
     expect(quote.summary).toBe('Sinclair S5 · Premium · 2.0 Turbo AWD');
     expect(quote.lines.map((l) => l.kind)).toEqual([
       'base', 'powertrain', 'trim', 'exterior_colour', 'interior_colour',

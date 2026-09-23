@@ -1,5 +1,5 @@
 import {
-  ASKS, RETRIES, UNSURE, GET_IT_RIGHT, TEAM_OFFER_TAILS, remember,
+  ASKS, RETRIES, UNSURE, GET_IT_RIGHT, TEAM_OFFER_TAILS, remember, offerIn,
   type AskKind, type ConversationState, type Flow, type Memory, type Step,
 } from './state';
 import {
@@ -1187,6 +1187,7 @@ function context(turn: Turn): DescribeContext {
     phone: m.phone,
     now,
     expanded: m.expanded,
+    tomorrow: /\btomorrow\b/.test(m.latest.normalised),
   };
 }
 
@@ -1253,9 +1254,12 @@ function compose(turn: Turn, steps: Step[]): Decision['text'] {
   // budget" — and nobody says "Absolutely!" in front of bad news.
   const caveat = preamble(m, answer, digest);
   const text = body || cannotHelp(m, digest);
+  // One offer per reply. A "yes" answers the last thing offered, so a drive
+  // tacked on after "want to see the rest?" would book a test drive for a
+  // customer who asked to see more cars.
   return paragraphs(
     caveat ? paragraphs(caveat, text) : inline(warmOpener(m, answer), text),
-    followUp(m, answer),
+    offerIn(text) ? '' : followUp(m, answer),
   );
 }
 
@@ -1543,11 +1547,8 @@ function offer(slots: Slot[]): string {
  * words can never change which time is booked.
  */
 function shortLabel(label: string): string {
-  const match =
-    /^(\w+), (\w+) (\d{1,2}), \d{4} at (\d{1,2}):(\d{2})[\s\u202f\u00a0]*([ap])\.?[\s\u202f\u00a0]?m\.?/i.exec(label);
-  if (!match) return label;
-  const [, weekday, month, day, hour, minute, half] = match;
-  return `${weekday}, ${month} ${day} at ${hour}${minute === '00' ? '' : `:${minute}`}${half!.toLowerCase()}m`;
+  // Within a fortnight the year says nothing.
+  return label.replace(/,?\s\d{4}(?= at )/, '');
 }
 
 /**
@@ -1636,7 +1637,7 @@ function relativeSlots(said: string, slots: Slot[], turn: Turn): Slot[] {
 }
 
 function partOfDay(label: string): 'morning' | 'afternoon' | 'evening' | undefined {
-  const match = /at (\d{1,2}):\d{2}[\s\u202f\u00a0]*([ap])/i.exec(label);
+  const match = /at (\d{1,2})(?::\d{2})?\s*([ap])m/i.exec(label);
   if (!match) return undefined;
   const hour = Number(match[1]) % 12 + (match[2]!.toLowerCase() === 'p' ? 12 : 0);
   return hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
@@ -1718,9 +1719,35 @@ function contactInput(m: Memory): Record<string, unknown> {
   };
 }
 
+/**
+ * Titles that are part of how a person is addressed, not their first name.
+ *
+ * "Hj Ahmad" is greeted as "Hj Ahmad", as anyone in Brunei would: "Hj" on its
+ * own is not a name, and "Ahmad" on its own drops the respect the title
+ * carries.
+ */
+const HONORIFICS = new Set([
+  'hj', 'haji', 'hjh', 'hajah', 'pg', 'pengiran', 'dk', 'dayang', 'awg', 'awang',
+  'dr', 'dato', "dato'", 'datin', 'datuk', 'mr', 'mrs', 'ms', 'miss',
+].map((title) => title.replace(/\.$/, '')));
+
+/**
+ * Name prefixes that are not what a person is called: "Mohd Ali" is Ali.
+ */
+const NAME_PREFIXES = new Set(['mohd', 'muhd', 'md', 'mohammad', 'muhammad', 'mohamad', 'mohamed']);
+
 function firstName(name: string): string {
-  const first = name.split(/\s+/)[0] ?? name;
-  return first.startsWith('@') ? name : first;
+  const words = name.trim().split(/\s+/);
+  const first = words[0] ?? name;
+  if (first.startsWith('@')) return name;
+
+  const plain = (word: string) => word.toLowerCase().replace(/\.$/, '');
+  if (HONORIFICS.has(plain(first)) && words[1]) {
+    const next = NAME_PREFIXES.has(plain(words[1])) && words[2] ? words[2] : words[1];
+    return `${first} ${next}`;
+  }
+  if (NAME_PREFIXES.has(plain(first)) && words[1]) return words[1];
+  return first;
 }
 
 function cancelTurn(m: Memory): Decision {

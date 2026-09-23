@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from '../define';
 import { applySignals, identifyConversationCustomer } from '@/server/services/leads';
+import { canDeliverEmail } from '@/server/services/email/provider';
 import {
   createCustomerRequest, createTradeIn, createFinancingRequest, requestHandoff,
 } from '@/server/services/tickets';
@@ -89,7 +90,7 @@ export const createCallbackRequest = defineTool({
   project: (result) => ({
     created: true,
     ticketNumber: result.ticketNumber,
-    confirmationEmail: result.confirmationEmailQueued ? 'queued' : 'not sent',
+    confirmationEmail: result.confirmationEmailQueued && canDeliverEmail() ? 'queued' : 'not sent',
     nextStep: 'A specialist will call. Do not say when unless the dealership has told you.',
   }),
 });
@@ -123,7 +124,7 @@ export const createSupportTicket = defineTool({
   project: (result) => ({
     created: true,
     ticketNumber: result.ticketNumber,
-    confirmationEmail: result.confirmationEmailQueued ? 'queued' : 'not sent',
+    confirmationEmail: result.confirmationEmailQueued && canDeliverEmail() ? 'queued' : 'not sent',
   }),
 });
 
@@ -169,7 +170,7 @@ export const createTradeInRequest = defineTool({
   project: (result) => ({
     created: true,
     ticketNumber: result.ticketNumber,
-    confirmationEmail: result.confirmationEmailQueued ? 'queued' : 'not sent',
+    confirmationEmail: result.confirmationEmailQueued && canDeliverEmail() ? 'queued' : 'not sent',
     // Stated here so the model has no room to imply a figure is coming by email.
     valuation: 'none — a trade-in value requires an in-person inspection',
   }),
@@ -218,7 +219,7 @@ export const createFinancingRequestTool = defineTool({
   project: (result) => ({
     created: true,
     ticketNumber: result.ticketNumber,
-    confirmationEmail: result.confirmationEmailQueued ? 'queued' : 'not sent',
+    confirmationEmail: result.confirmationEmailQueued && canDeliverEmail() ? 'queued' : 'not sent',
     approval: 'none — a specialist reviews financing and confirms terms',
   }),
 });

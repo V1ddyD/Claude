@@ -29,8 +29,8 @@ describe('resolving a dealership from its hostname', () => {
     const tenant = await resolveTenantByHost('sinclair.test');
     expect(tenant.id).toBe(SINCLAIR_TENANT_ID);
     expect(tenant.brandName).toBe('Sinclair');
-    expect(tenant.currency).toBe('CAD');
-    expect(tenant.timezone).toBe('America/Toronto');
+    expect(tenant.currency).toBe('BND');
+    expect(tenant.timezone).toBe('Asia/Brunei');
   });
 
   it('resolves a second dealership to itself, not the first', async () => {

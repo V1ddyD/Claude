@@ -235,3 +235,24 @@ describe('what a sender cannot do', () => {
     }
   });
 });
+
+describe('when email is not set up', () => {
+  it('never tells the customer an email is on its way', async () => {
+    const { setEmailProvider } = await import('../../src/server/services/email/provider');
+    setEmailProvider(null);
+    try {
+      setModelClient(new RuleBasedModel());
+      setChannelProvider(new ProfileProvider(null));
+      const say = dm(`igsid-noemail-${RUN}`);
+      replied(await say('can I test drive the S3?'));
+      replied(await say('the first one'));
+      replied(await say(`Nur Aini, nur.${RUN}@example.test, 8123456`));
+      const booked = replied(await say('yes'));
+      expect(booked.text).toMatch(/booked|all sorted/i);
+      expect(booked.text).not.toMatch(/email/i);
+      expect(booked.text).toMatch(/code handy/i);
+    } finally {
+      setEmailProvider({ name: 'test-default', async send() { return { accepted: true, providerMessageId: 'x' }; } });
+    }
+  });
+});

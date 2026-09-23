@@ -53,8 +53,8 @@ export const SINCLAIR_STAFF = {
 export async function seedSinclair(sql: Sql): Promise<void> {
   await sql`
     INSERT INTO tenants (id, slug, legal_name, brand_name, timezone, currency, locale, ticket_prefix)
-    VALUES (${SINCLAIR_TENANT_ID}, 'sinclair', 'Sinclair Motors Canada Inc.', 'Sinclair',
-            'America/Toronto', 'CAD', 'en-CA', 'SIN')
+    VALUES (${SINCLAIR_TENANT_ID}, 'sinclair', 'Sinclair Motors (B) Sdn Bhd', 'Sinclair',
+            'Asia/Brunei', 'BND', 'en-GB', 'SIN')
     ON CONFLICT (id) DO UPDATE SET brand_name = EXCLUDED.brand_name
   `;
 
@@ -70,10 +70,10 @@ export async function seedSinclair(sql: Sql): Promise<void> {
     VALUES (
       ${SINCLAIR_TENANT_ID},
       ${sql.json({
-        phone: '+1 416 555 0142',
+        phone: '+673 222 0142',
         email: 'hello@sinclair.test',
-        addressLine1: '1200 Lakeshore Boulevard West',
-        city: 'Toronto', region: 'ON', postalCode: 'M6K 3B4', country: 'CA',
+        addressLine1: 'Lot 12, Jalan Gadong',
+        city: 'Bandar Seri Begawan', region: 'Brunei-Muara', postalCode: 'BE3519', country: 'BN',
       })},
       ${sql.json({
         // Test drives: 45 minutes of driving plus 15 minutes of paperwork.
@@ -103,22 +103,24 @@ export async function seedSinclair(sql: Sql): Promise<void> {
         defaultAprBps: 649,
         termsMonths: [36, 48, 60, 72, 84],
         disclaimer:
-          'Estimate only. Excludes taxes, registration and dealer fees. ' +
-          'Not an offer of credit or a guarantee of approval.',
+          'Estimate only. Excludes insurance, road tax and registration. ' +
+          'Not an offer of financing or a guarantee of approval.',
       })}
     )
     ON CONFLICT (tenant_id) DO NOTHING
   `;
 
-  // Mon-Fri 09:00-19:00, Sat 10:00-17:00, closed Sunday.
+  // A Brunei showroom's week: open Saturday and Sunday for weekend buyers,
+  // Friday only after Friday prayers.
   await sql`
     INSERT INTO business_hours (tenant_id, department, day_of_week, opens_at, closes_at)
     SELECT ${SINCLAIR_TENANT_ID}, d.dept, d.dow::smallint, d.opens::time, d.closes::time
     FROM (VALUES
-      ('sales',1,'09:00','19:00'), ('sales',2,'09:00','19:00'), ('sales',3,'09:00','19:00'),
-      ('sales',4,'09:00','19:00'), ('sales',5,'09:00','19:00'), ('sales',6,'10:00','17:00'),
-      ('service',1,'07:30','18:00'), ('service',2,'07:30','18:00'), ('service',3,'07:30','18:00'),
-      ('service',4,'07:30','18:00'), ('service',5,'07:30','18:00')
+      ('sales',0,'10:00','16:00'),
+      ('sales',1,'09:00','18:00'), ('sales',2,'09:00','18:00'), ('sales',3,'09:00','18:00'),
+      ('sales',4,'09:00','18:00'), ('sales',5,'14:00','18:00'), ('sales',6,'09:00','18:00'),
+      ('service',1,'08:00','17:00'), ('service',2,'08:00','17:00'), ('service',3,'08:00','17:00'),
+      ('service',4,'08:00','17:00'), ('service',6,'08:00','17:00')
     ) AS d(dept, dow, opens, closes)
     ON CONFLICT (tenant_id, department, day_of_week) DO NOTHING
   `;

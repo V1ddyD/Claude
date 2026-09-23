@@ -47,7 +47,7 @@ const DISCLAIMER =
 
 export function calculateFinanceEstimate(
   input: FinanceInput,
-  display: { currency: string; locale: string },
+  display: { currency: string; locale: string; disclaimer?: string },
 ): FinanceEstimate {
   const { vehiclePriceCents, termMonths, aprBps } = input;
   const downPayment = input.downPaymentCents ?? 0;
@@ -100,7 +100,9 @@ export function calculateFinanceEstimate(
       totalInterest: money(totalInterestCents),
       amountFinanced: money(amountFinanced),
     },
-    disclaimer: DISCLAIMER,
+    // The dealership's own wording where it has one: what an estimate
+    // leaves out differs by country, and the dealership knows which.
+    disclaimer: display.disclaimer?.trim() || DISCLAIMER,
   };
 }
 

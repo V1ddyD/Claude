@@ -5,6 +5,7 @@ import { PriorityBadge } from '@/components/portal/priority-badge';
 import { Tag } from '@/components/portal/tag';
 import { relativeTime } from '@/components/portal/relative-time';
 import { formatMoney } from '@/server/services/pricing';
+import { getTenantById } from '@/server/context/tenant';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Leads' };
@@ -32,6 +33,7 @@ export default async function LeadsPage() {
     staff,
   }));
 
+  const tenant = await getTenantById(staff.tenantId);
   const waiting = rows.filter((lead) => !lead.assignedTo).length;
 
   return (
@@ -90,7 +92,7 @@ export default async function LeadsPage() {
                       {lead.budgetCents !== null && (
                         <span className="text-ink-500">
                           {' · '}
-                          around {formatMoney(lead.budgetCents, 'CAD', 'en-CA')}
+                          around {formatMoney(lead.budgetCents, tenant.currency, tenant.locale)}
                         </span>
                       )}
                     </p>

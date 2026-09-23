@@ -18,6 +18,9 @@ import {
  * customer, a filter expression, a table name or a row limit above a small cap.
  */
 
+/** The most cars one stock answer lists. */
+const STOCK_LIST_LIMIT = 20;
+
 export const searchVehicles = defineTool({
   name: 'searchVehicles',
   scope: 'read',
@@ -349,7 +352,7 @@ export const calculateVehiclePrice = defineTool({
       amount: l.included ? 'Included' : l.formatted,
     })),
     total: { formatted: breakdown.totalFormatted, cents: breakdown.totalCents },
-    note: 'Vehicle price only. Excludes taxes, registration and dealer fees.',
+    note: 'Vehicle price only. On-the-road costs such as registration and insurance are extra.',
   }),
 });
 
@@ -391,7 +394,9 @@ export const checkInventory = defineTool({
       .innerJoin(trims, eq(trims.id, modelConfigurations.trimId))
       .innerJoin(powertrains, eq(powertrains.id, modelConfigurations.powertrainId))
       .where(and(...conditions))
-      .limit(5);
+      // Enough to show a model's whole stock when the customer asks for all
+      // of it, and still a bounded read.
+      .limit(STOCK_LIST_LIMIT);
 
     const colourIds = rows
       .flatMap((r) => [r.exteriorColourId, r.interiorColourId])
@@ -420,8 +425,8 @@ export const checkInventory = defineTool({
         interiorColour: colourNames.get(r.interiorColourId ?? '')?.name ?? null,
       }));
 
-    // Only five cars are ever returned, so "5 here now" was wrong for any
-    // model with more. The total is counted separately so the headline is
+    // At most STOCK_LIST_LIMIT cars are returned, so a count of the rows is
+    // wrong for any model with more. The total is counted separately so the headline is
     // true even when the list is a sample. Not counted when a colour filter
     // applies after the fact: the list is the whole answer then.
     const total = input.exteriorColourCode

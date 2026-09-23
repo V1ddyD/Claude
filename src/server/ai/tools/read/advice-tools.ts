@@ -137,7 +137,7 @@ export const calculateFinanceEstimateTool = defineTool({
       .where(eq(tenantSettings.tenantId, ctx.tenantId))
       .limit(1);
 
-    const configured = (settings[0]?.finance ?? {}) as { defaultAprBps?: number };
+    const configured = (settings[0]?.finance ?? {}) as { defaultAprBps?: number; disclaimer?: string };
     const aprBps = input.aprBps ?? configured.defaultAprBps;
 
     // No invented rate. If the dealership has not configured one and the
@@ -151,7 +151,7 @@ export const calculateFinanceEstimateTool = defineTool({
 
     return calculateFinanceEstimate(
       { ...input, aprBps },
-      { currency: ctx.tenant.currency, locale: ctx.tenant.locale },
+      { currency: ctx.tenant.currency, locale: ctx.tenant.locale, disclaimer: configured.disclaimer },
     );
   },
   project: (estimate) => ({

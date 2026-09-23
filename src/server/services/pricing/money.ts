@@ -4,7 +4,21 @@
  */
 export type Cents = number;
 
+/**
+ * How a currency is written where it is spent, when that differs from what
+ * Intl prints. Intl writes Brunei dollars as "BND 56,400"; Brunei writes
+ * "B$56,400".
+ */
+const LOCAL_SYMBOLS: Record<string, string> = { BND: 'B$' };
+
 export function formatMoney(cents: Cents, currency: string, locale: string): string {
+  const symbol = LOCAL_SYMBOLS[currency];
+  if (symbol) {
+    return `${symbol}${new Intl.NumberFormat(locale, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(cents / 100)}`;
+  }
   return new Intl.NumberFormat(locale, {
     style: 'currency',
     currency,

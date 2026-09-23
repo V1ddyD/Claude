@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { and, eq, desc, inArray, or } from 'drizzle-orm';
 import { withStaff } from '@/server/auth/require-staff';
+import { getTenantById } from '@/server/context/tenant';
 import { tickets, customers, staffUsers } from '@/server/db/schema';
 
 export const dynamic = 'force-dynamic';
@@ -17,7 +18,7 @@ export const metadata = { title: 'Tickets' };
 const SERVICE_TYPES = ['service'] as const;
 
 export default async function TicketsPage() {
-  const { rows, seesService, seesSales } = await withStaff(
+  const { rows, seesService, seesSales, tenantId } = await withStaff(
     'customer.read',
     async (db, staff) => {
       const canSeeSales = staff.can('ticket.sales.read');
@@ -35,6 +36,7 @@ export default async function TicketsPage() {
             );
 
       return {
+        tenantId: staff.tenantId,
         seesSales: canSeeSales,
         seesService: canSeeService,
         rows: await db
@@ -59,6 +61,7 @@ export default async function TicketsPage() {
       };
     },
   );
+  const tenant = await getTenantById(tenantId);
 
   const open = rows.filter((t) => t.status === 'open' || t.status === 'in_progress');
 
@@ -119,9 +122,10 @@ export default async function TicketsPage() {
                     {ticket.status.replace(/_/g, ' ')}
                   </td>
                   <td className="px-4 py-3 align-top text-ink-500">
-                    {new Intl.DateTimeFormat('en-CA', { dateStyle: 'medium' }).format(
-                      ticket.createdAt,
-                    )}
+                    {new Intl.DateTimeFormat(tenant.locale, {
+                      timeZone: tenant.timezone,
+                      dateStyle: 'medium',
+                    }).format(ticket.createdAt)}
                   </td>
                 </tr>
               ))}

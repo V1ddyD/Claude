@@ -42,6 +42,8 @@ export interface DescribeContext {
   email?: string;
   phone?: string;
   now?: Date;
+  /** The customer asked about tomorrow, so the hours line is about tomorrow. */
+  tomorrow?: boolean;
 }
 
 function obj(value: unknown): Json {
@@ -623,19 +625,19 @@ function describeStock(result: Json, v: Voice, ctx: DescribeContext): string {
           `We have ${count(total)} ready now:`,
         ]);
 
-  // Only offered when the extra rows can actually be shown: the stock tool
-  // returns a handful, and offering "the lot" and then showing the same three
-  // would be a promise the next reply could not keep.
-  const canShowMore = rest > 0 && available.length > shown.length;
+  // "The rest" is only offered when the next reply can show all of it. When
+  // the model has more cars than one answer lists, the count is still true
+  // and the team is offered instead of a list that would stop short.
+  const allListed = available.length >= total;
 
   return paragraphs(
     lead,
     lines.join('\n'),
-    canShowMore
-      ? andMore(available.length - shown.length, v, 'on site')
-      : rest > 0
-        ? `Plus ${count(rest)} more on site.`
-        : '',
+    rest === 0
+      ? ''
+      : allListed
+        ? andMore(rest, v, 'on site')
+        : `Plus ${count(rest)} more on site. The team can take you through every one.`,
     v.pick('stock:caveat', [
       "Stock moves quickly, so that's as of today.",
       "That's today's picture; stock does move.",
@@ -709,7 +711,7 @@ function describeHours(result: Json, ctx: DescribeContext): string {
   return paragraphs(
     `Our ${department} hours:`,
     lines.join('\n'),
-    today(hours, str(result.timezone), ctx.now),
+    today(hours, str(result.timezone), ctx.now, ctx.tomorrow),
     closures.length ? `We're also closed on:\n${closures.join('\n')}` : '',
   );
 }
@@ -721,8 +723,14 @@ function describeHours(result: Json, ctx: DescribeContext): string {
  * Tuesday. Worked out from the same hours the list shows, and the clock the
  * turn was answered at, so it can never disagree with the table above it.
  */
-function today(hours: Json[], timezone: string | undefined, now: Date | undefined): string {
+function today(
+  hours: Json[],
+  timezone: string | undefined,
+  now: Date | undefined,
+  tomorrow = false,
+): string {
   if (!now || !timezone) return '';
+  if (tomorrow) return tomorrowLine(hours, timezone, now);
   let weekday: string;
   let time: string;
   try {
@@ -751,6 +759,28 @@ function today(hours: Json[], timezone: string | undefined, now: Date | undefine
   if (time < opens) return `Today (${weekday}) we're open from ${clock(opens)} until ${clock(closes)}.`;
   if (time < closes) return `We're open right now, until ${clock(closes)} today.`;
   return `We've closed for today.${reopen}`;
+}
+
+/** "Tomorrow (Thursday) we're open from 9am until 7pm." */
+function tomorrowLine(hours: Json[], timezone: string, now: Date): string {
+  let weekday: string;
+  try {
+    weekday = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, weekday: 'long' }).format(
+      new Date(now.getTime() + 86_400_000),
+    );
+  } catch {
+    return '';
+  }
+  const index = hours.findIndex((day) => str(day.day) === weekday);
+  const row = hours[index];
+  if (!row) return '';
+  if (row.closed !== true) {
+    return `Tomorrow (${weekday}) we're open from ${clock(str(row.opens))} until ${clock(str(row.closes))}.`;
+  }
+  const next = [1, 2, 3, 4, 5, 6, 7]
+    .map((offset) => hours[(index + offset) % hours.length]!)
+    .find((day) => day.closed !== true);
+  return `We're closed tomorrow (${weekday}).${next ? ` We're open again ${str(next.day)} from ${clock(str(next.opens))}.` : ''}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -787,7 +817,10 @@ function describeBooking(result: Json, v: Voice, ctx: DescribeContext): string {
           `A confirmation email is on its way${ctx.email ? ` to ${ctx.email}` : ''}.`,
           ctx.phone ? 'The team has your number in case anything changes on the day.' : '',
         )
-      : "I couldn't queue a confirmation email, so do keep that code somewhere safe.",
+      : sentences(
+          'Keep that code handy; it is all you need to change the booking.',
+          ctx.phone ? 'The team has your number too, in case anything comes up on the day.' : '',
+        ),
     v.pick('book:close', [
       'If you need to move it, just send me your confirmation code. See you then!',
       "Looking forward to seeing you. If plans change, message me with your code and I'll sort it.",

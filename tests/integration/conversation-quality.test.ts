@@ -292,3 +292,47 @@ describe('what reaches a direct message', () => {
     }
   });
 });
+
+describe('found by walking through the demo', () => {
+  it('counts the stock it has not shown yet correctly, and shows it all on yes', async () => {
+    const say = chat();
+    const first = await say('do you have the S5 in stock?');
+    const shown = first.text.split('\n').filter((line) => line.startsWith('- ')).length;
+    // "Ten here" with three listed is seven more, not two.
+    const [, headline] = /(\w+) (?:here right now|on site at the moment|ready now)/.exec(first.text) ?? [];
+    const [, more] = /There (?:is|are) (\w+) more/.exec(first.text) ?? [];
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+    const asNumber = (w?: string) => (w && /^\d+$/.test(w) ? Number(w) : words.indexOf(w ?? ''));
+    expect(asNumber(more)).toBe(asNumber(headline) - shown);
+
+    // One offer per reply: "yes" means the rest of the cars, not a test drive.
+    const rest = await say('yes');
+    expect(rest.toolsUsed).toContain('checkInventory');
+    expect(rest.toolsUsed).not.toContain('getAvailableTestDriveSlots');
+    expect(rest.text.split('\n').filter((line) => line.startsWith('- ')).length).toBe(asNumber(headline));
+  });
+
+  it("gives tomorrow's hours when asked about tomorrow", async () => {
+    const reply = await chat()('what time u open tmr');
+    expect(reply.text).toMatch(/tomorrow/i);
+    expect(reply.text).not.toMatch(/^Today \(/m);
+  });
+
+  it('addresses a customer by title and name, as people in Brunei are', async () => {
+    const say = chat();
+    await say('I would like to test drive the S3');
+    await say('the first one');
+    const next = await say('Hj Ahmad, hj.ahmad@example.test, +673 812 3456');
+    expect(next.text).toMatch(/Hj Ahmad/);
+    expect(next.text).not.toMatch(/\bHj[.,!]/);
+  });
+
+  it('writes times the way the dealership does, in Brunei dollars and Brunei time', async () => {
+    const say = chat();
+    const price = await say('how much is the S5?');
+    expect(price.text).toMatch(/B\$56,400/);
+    const slots = await say('can I test drive the S5 on Saturday?');
+    expect(slots.text).toMatch(/^1\. Saturday,? \d{1,2} \w+ at \d{1,2}(:\d{2})?[ap]m$/m);
+    expect(slots.text).not.toMatch(/EDT|EST|GMT/);
+  });
+});

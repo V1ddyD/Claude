@@ -159,6 +159,15 @@ describe('choosing a time', () => {
     expect(chosenFromOffer(offered, 'Saturday is good')).toBeUndefined();
   });
 
+  it('matches the labels offered now, as well as older ones', () => {
+    const label = 'Saturday, 26 September 2026 at 10am';
+    expect(saidMatchesSlot(label, 'saturday 10am')).toBe(true);
+    expect(saidMatchesSlot(label, '10:00am please')).toBe(true);
+    expect(saidMatchesSlot(label, 'saturday at 3pm')).toBe(false);
+    expect(saidMatchesSlot('Friday, 25 September 2026 at 2:30pm', 'friday 2:30pm')).toBe(true);
+    expect(saidMatchesSlot('Friday, 25 September 2026 at 2:30pm', 'friday 2pm')).toBe(false);
+  });
+
   it('matches the wording that was offered, not a re-derived time', () => {
     const label = 'Saturday, September 12, 2026 at 10:00 a.m. EDT';
     expect(saidMatchesSlot(label, 'saturday 10am')).toBe(true);
