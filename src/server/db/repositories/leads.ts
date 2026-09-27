@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, desc, isNull, or, inArray, sql } from 'drizzle-orm';
+import { and, eq, desc, isNull, isNotNull, or, inArray, sql } from 'drizzle-orm';
 import {
   leads, leadEvents, leadSignals, customers, staffUsers, staffNotes,
   messages, appointments, tickets, vehicleModels, channelIdentities,
@@ -22,8 +22,15 @@ function visibilityFilter(staff: StaffContext) {
   return or(eq(leads.assignedStaffId, staff.authUserId), isNull(leads.assignedStaffId));
 }
 
-export async function listLeads(db: TenantDb, staff: StaffContext, limit = 50) {
+export async function listLeads(
+  db: TenantDb,
+  staff: StaffContext,
+  limit = 50,
+  options: { done?: boolean } = {},
+) {
   const filter = visibilityFilter(staff);
+  // The working list by default; the ones marked done only when asked for.
+  const doneFilter = options.done ? isNotNull(leads.doneAt) : isNull(leads.doneAt);
 
   return db
     .select({
@@ -41,6 +48,7 @@ export async function listLeads(db: TenantDb, staff: StaffContext, limit = 50) {
       assignedTo: staffUsers.fullName,
       lastActivityAt: leads.lastActivityAt,
       createdAt: leads.createdAt,
+      doneAt: leads.doneAt,
 
       // What they are actually shopping for, and whether it is already in the
       // diary. Both are correlated subqueries rather than joins: a join on
@@ -77,7 +85,7 @@ export async function listLeads(db: TenantDb, staff: StaffContext, limit = 50) {
     .from(leads)
     .innerJoin(customers, eq(customers.id, leads.customerId))
     .leftJoin(staffUsers, eq(staffUsers.id, leads.assignedStaffId))
-    .where(and(eq(leads.tenantId, db.tenantId), ...(filter ? [filter] : [])))
+    .where(and(eq(leads.tenantId, db.tenantId), doneFilter, ...(filter ? [filter] : [])))
     .orderBy(
       // Highest priority first, then most recently active: the order a
       // salesperson should work the list in.
@@ -97,6 +105,7 @@ export async function countByPriority(db: TenantDb, staff: StaffContext) {
       and(
         eq(leads.tenantId, db.tenantId),
         inArray(leads.status, ['new', 'contacted', 'qualified', 'appointment_scheduled', 'negotiating']),
+        isNull(leads.doneAt),
         ...(filter ? [filter] : []),
       ),
     )

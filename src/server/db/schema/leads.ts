@@ -40,6 +40,9 @@ export const leads = pgTable(
     lastActivityAt: timestamp('last_activity_at', { withTimezone: true }).notNull().defaultNow(),
     nextFollowUpAt: timestamp('next_follow_up_at', { withTimezone: true }),
     closedAt: timestamp('closed_at', { withTimezone: true }),
+    /** Taken care of: left out of every to-do list until reopened or the customer writes again. */
+    doneAt: timestamp('done_at', { withTimezone: true }),
+    doneBy: uuid('done_by'),
     lostReason: text('lost_reason'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

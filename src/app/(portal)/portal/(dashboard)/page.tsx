@@ -9,6 +9,7 @@ import { appointments, leads, tickets } from '@/server/db/schema';
 import { relativeTime } from '@/components/portal/relative-time';
 import { PriorityBadge } from '@/components/portal/priority-badge';
 import { completeFollowUpAction } from './leads/[id]/actions';
+import { markLeadDoneAction } from './done-actions';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Dashboard' };
@@ -66,6 +67,7 @@ export default async function DashboardPage() {
                 and(
                   eq(leads.tenantId, db.tenantId),
                   isNull(leads.assignedStaffId),
+                  isNull(leads.doneAt),
                   inArray(leads.status, ['new', 'contacted', 'qualified']),
                 ),
               )
@@ -224,6 +226,18 @@ export default async function DashboardPage() {
                   <p className="shrink-0 text-xs text-ink-500">
                     {relativeTime(lead.lastActivityAt)}
                   </p>
+                  {/* Above the row's link, so it can be pressed. */}
+                  <form action={markLeadDoneAction} className="relative z-10 shrink-0">
+                    <input type="hidden" name="leadId" value={lead.id} />
+                    <input type="hidden" name="back" value="dashboard" />
+                    <button
+                      type="submit"
+                      title="Taken care of: remove from the to-do list"
+                      className="border border-ink-100 bg-white px-2.5 py-1 text-xs text-ink-900 hover:bg-ink-50"
+                    >
+                      ✓ Done
+                    </button>
+                  </form>
                 </div>
               </li>
             ))}

@@ -38,6 +38,13 @@ export async function evaluateFollowUps(tenantId: string, now = new Date()): Pro
       rows: { leadId: string; reason: string; dueAt: Date; appointmentId?: string }[],
     ) => {
       for (const row of rows) {
+        // A customer marked done needs no chasing.
+        const [target] = await db
+          .select({ doneAt: leads.doneAt })
+          .from(leads)
+          .where(and(eq(leads.tenantId, db.tenantId), eq(leads.id, row.leadId)))
+          .limit(1);
+        if (!target || target.doneAt) continue;
         const inserted = await db
           .insert(followUpTasks)
           .values({
@@ -231,6 +238,7 @@ export async function listDueFollowUps(db: TenantDb, staffId: string, seesAll: b
         eq(followUpTasks.tenantId, db.tenantId),
         eq(followUpTasks.status, 'pending'),
         lte(followUpTasks.dueAt, new Date()),
+        isNull(leads.doneAt),
         ...(seesAll
           ? []
           : [or(eq(leads.assignedStaffId, staffId), isNull(leads.assignedStaffId))!]),

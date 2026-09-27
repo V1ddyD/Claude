@@ -6,6 +6,7 @@ import { Tag } from '@/components/portal/tag';
 import { relativeTime } from '@/components/portal/relative-time';
 import { formatMoney } from '@/server/services/pricing';
 import { getTenantById } from '@/server/context/tenant';
+import { markLeadDoneAction, reopenLeadAction } from '../done-actions';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Leads' };
@@ -27,11 +28,13 @@ const TIMEFRAMES: Record<string, string> = {
   unknown: '',
 };
 
-export default async function LeadsPage() {
+export default async function LeadsPage({ searchParams }: { searchParams: Promise<{ view?: string }> }) {
+  const showDone = (await searchParams).view === 'done';
   const { rows, staff } = await withStaff('lead.read.assigned', async (db, staff) => ({
-    rows: await listLeads(db, staff),
+    rows: await listLeads(db, staff, 50, { done: showDone }),
     staff,
   }));
+  const canMarkDone = staff.can('lead.status.write');
 
   const tenant = await getTenantById(staff.tenantId);
   const waiting = rows.filter((lead) => !lead.assignedTo).length;
@@ -39,24 +42,36 @@ export default async function LeadsPage() {
   return (
     <>
       <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <h1 className="text-2xl font-medium tracking-tight text-ink-900">Leads</h1>
+        <h1 className="text-2xl font-medium tracking-tight text-ink-900">{showDone ? 'Done' : 'Leads'}</h1>
         <p className="text-sm text-ink-500">
-          {staff.can('lead.read.all') ? 'All dealership leads' : 'Assigned to you and unassigned'}
-          {waiting > 0 && (
+          {showDone
+            ? 'Customers already taken care of'
+            : staff.can('lead.read.all') ? 'All leads' : 'Assigned to you and unassigned'}
+          {!showDone && waiting > 0 && (
             <>
               {' · '}
               <span className="text-accent-600">{waiting} unassigned</span>
             </>
           )}
+          {' · '}
+          <Link href={showDone ? '/portal/leads' : '/portal/leads?view=done'} className="text-ink-900 underline">
+            {showDone ? 'Back to active' : 'Show done'}
+          </Link>
         </p>
       </div>
 
       {rows.length === 0 ? (
         <div className="mt-10 rounded border border-dashed border-ink-100 bg-white/50 px-6 py-12 text-center">
-          <p className="text-sm text-ink-900">No leads yet.</p>
-          <p className="mt-1 text-sm text-ink-500">
-            One appears the moment a customer leaves their details with the assistant.
-          </p>
+          {showDone ? (
+            <p className="text-sm text-ink-900">Nothing marked done yet.</p>
+          ) : (
+            <>
+              <p className="text-sm text-ink-900">No leads waiting.</p>
+              <p className="mt-1 text-sm text-ink-500">
+                One appears the moment a customer leaves their details with the assistant.
+              </p>
+            </>
+          )}
         </div>
       ) : (
         <ul className="mt-8 divide-y divide-ink-100 overflow-hidden rounded border border-ink-100 bg-white">
@@ -117,6 +132,19 @@ export default async function LeadsPage() {
                         <span className="text-accent-600">Unassigned</span>
                       )}
                     </p>
+                    {canMarkDone && (
+                      // Above the row's link, so it can be pressed.
+                      <form action={showDone ? reopenLeadAction : markLeadDoneAction} className="relative z-10 mt-2">
+                        <input type="hidden" name="leadId" value={lead.id} />
+                        <input type="hidden" name="back" value="leads" />
+                        <button
+                          type="submit"
+                          className="border border-ink-100 bg-white px-2.5 py-1 text-xs text-ink-900 hover:bg-ink-50"
+                        >
+                          {showDone ? 'Reopen' : '✓ Done'}
+                        </button>
+                      </form>
+                    )}
                   </div>
                 </div>
               </li>

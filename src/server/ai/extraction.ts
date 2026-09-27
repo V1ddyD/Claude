@@ -4,6 +4,7 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import { and, eq, asc } from 'drizzle-orm';
 import { messages as messagesTable, conversations, leads } from '@/server/db/schema';
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
+import { reopenIfCustomerReturned } from '@/server/services/leads/done';
 import { modelClient, EXTRACTION_MODEL, type ModelClient } from '@/server/ai/client';
 import { RuleBasedModel } from '@/server/ai/rule-based';
 import { extractSignals, type ResolvedBuild } from '@/server/ai/rule-based/signals';
@@ -54,6 +55,8 @@ export async function extractAndScore(params: {
     // nothing to attach to, and creating a lead for an anonymous browser would
     // fill the portal with records staff cannot act on.
     if (!lead) return { leadId: null, signals: {}, skipped: 'no-lead' };
+    // Marked done, and then the customer wrote again: back on the list.
+    await reopenIfCustomerReturned(db, lead.id, params.conversationId);
     if (!client) return { leadId: lead.id, signals: {}, skipped: 'no-client' };
 
     // Pass B, deterministically.

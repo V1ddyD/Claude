@@ -3,6 +3,7 @@ import { and, eq, gte, inArray, asc } from 'drizzle-orm';
 import { withStaff } from '@/server/auth/require-staff';
 import { appointments, customers } from '@/server/db/schema';
 import { getTenantById } from '@/server/context/tenant';
+import { markAppointmentDoneAction } from '../done-actions';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Appointments' };
@@ -100,6 +101,16 @@ export default async function AppointmentsPage() {
                     <span className="text-xs uppercase tracking-wider text-ink-500">
                       {appointment.status}
                     </span>
+                    <form action={markAppointmentDoneAction}>
+                      <input type="hidden" name="appointmentId" value={appointment.id} />
+                      <button
+                        type="submit"
+                        title="It happened: take it off the calendar"
+                        className="border border-ink-100 px-2.5 py-1 text-xs text-ink-900 hover:bg-ink-50"
+                      >
+                        ✓ Done
+                      </button>
+                    </form>
                   </li>
                 ))}
               </ul>

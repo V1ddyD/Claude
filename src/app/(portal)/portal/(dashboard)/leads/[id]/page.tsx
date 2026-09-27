@@ -5,6 +5,7 @@ import { getLeadDetail } from '@/server/db/repositories/leads';
 import { allowedNextStatuses } from '@/server/services/leads/actions';
 import { staffUsers } from '@/server/db/schema';
 import { changeStatusAction, assignLeadAction, addNoteAction } from './actions';
+import { markLeadDoneAction, reopenLeadAction } from '../../done-actions';
 import { PriorityBadge } from '@/components/portal/priority-badge';
 import { RichText } from '@/components/rich-text';
 import { formatMoney } from '@/server/services/pricing';
@@ -71,6 +72,29 @@ export default async function LeadPage({
           </h1>
           <span className="text-sm text-ink-500">score {lead.score}</span>
         </div>
+
+        {staff.canWriteStatus && (
+          lead.doneAt ? (
+            <div className="mt-4 flex flex-wrap items-center gap-3 rounded border border-ink-100 bg-white px-4 py-3">
+              <span className="text-sm text-ink-900">✓ Done. This customer is off your to-do lists.</span>
+              <form action={reopenLeadAction}>
+                <input type="hidden" name="leadId" value={lead.id} />
+                <button type="submit" className="border border-ink-100 px-3 py-1.5 text-xs text-ink-900 hover:bg-ink-50">
+                  Reopen
+                </button>
+              </form>
+            </div>
+          ) : (
+            <form action={markLeadDoneAction} className="mt-4">
+              <input type="hidden" name="leadId" value={lead.id} />
+              <input type="hidden" name="back" value="leads" />
+              <button type="submit" className="bg-ink-900 px-4 py-2 text-sm text-white hover:bg-ink-800">
+                ✓ Mark as done
+              </button>
+              <span className="ml-3 text-xs text-ink-500">Taken care of? Clears them from your to-do lists.</span>
+            </form>
+          )
+        )}
 
         {lead.scoreRationale && (
           <p className="mt-2 text-sm text-ink-500">{lead.scoreRationale}</p>
