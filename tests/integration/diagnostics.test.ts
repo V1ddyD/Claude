@@ -18,7 +18,8 @@ afterAll(async () => {
 
 describe('channel diagnostics', () => {
   it('reports delivery and replies without customer data or tokens', async () => {
-    const report = await channelDiagnostics();
+    // Not asking Instagram: a test does not call out to Meta.
+    const report = await channelDiagnostics({ askPlatform: false });
     expect(report.inbound).toHaveProperty('last24h');
     for (const account of report.accounts) {
       expect(account).not.toHaveProperty('accessToken');

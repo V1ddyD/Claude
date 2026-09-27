@@ -34,9 +34,26 @@ interface AccountDiagnostics {
   tokenExpiresAt: string | null;
   outbound24h: Record<string, number>;
   recent: { at: string; status: string; attempts: number; error: string | null }[];
+  /** What Instagram itself says about this account, asked with its own token. */
+  platform?: PlatformLink;
 }
 
-export async function channelDiagnostics(): Promise<ChannelDiagnostics> {
+interface PlatformLink {
+  /** The token works: Instagram says who it belongs to. */
+  tokenValid: boolean;
+  username: string | null;
+  /**
+   * The webhook subscription: which events Instagram forwards to us. Without
+   * "messages" here, DMs arrive in the inbox and never reach the assistant.
+   */
+  subscribedFields: string[] | null;
+  error: string | null;
+}
+
+export async function channelDiagnostics(
+  options: { askPlatform?: boolean } = {},
+): Promise<ChannelDiagnostics> {
+  const askPlatform = options.askPlatform ?? true;
   const since = new Date(Date.now() - 24 * 3600_000);
 
   const inbound = await withoutTenantScope('health', async (db) => {
@@ -59,6 +76,8 @@ export async function channelDiagnostics(): Promise<ChannelDiagnostics> {
           displayName: channelAccounts.displayName,
           active: channelAccounts.isActive,
           hasToken: sql<boolean>`${channelAccounts.accessToken} IS NOT NULL AND length(${channelAccounts.accessToken}) > 0`,
+          // Used to ask Instagram about the link below. Never returned.
+          accessToken: channelAccounts.accessToken,
           tokenExpiresAt: channelAccounts.tokenExpiresAt,
         })
         .from(channelAccounts)
@@ -112,6 +131,10 @@ export async function channelDiagnostics(): Promise<ChannelDiagnostics> {
           attempts: r.attempts,
           error: scrub(r.error),
         })),
+        platform:
+          askPlatform && account.channel === 'instagram' && account.accessToken
+            ? await instagramLink(account.accessToken)
+            : undefined,
       });
     }
   }
@@ -133,4 +156,82 @@ export function scrub(error: string | null): string | null {
     .replace(/access_token=[^&\s"']+/gi, 'access_token=[redacted]')
     .replace(/[A-Za-z0-9_\-]{40,}/g, '[redacted]')
     .slice(0, 300);
+}
+
+const INSTAGRAM = 'https://graph.instagram.com/v26.0';
+
+async function graph(
+  path: string,
+  token: string,
+  init: RequestInit = {},
+): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+  try {
+    const response = await fetch(`${INSTAGRAM}${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ok: response.ok, body };
+  } catch (error) {
+    return { ok: false, body: { error: { message: error instanceof Error ? error.message : 'request failed' } } };
+  }
+}
+
+function graphError(body: Record<string, unknown>): string | null {
+  const error = body.error as { message?: string; code?: number } | undefined;
+  return error ? scrub(`${error.code ?? ''} ${error.message ?? ''}`.trim()) : null;
+}
+
+/** Instagram's own answer: does the token work, and is the webhook subscribed? */
+async function instagramLink(token: string): Promise<PlatformLink> {
+  const me = await graph('/me?fields=user_id,username', token);
+  if (!me.ok) {
+    return { tokenValid: false, username: null, subscribedFields: null, error: graphError(me.body) };
+  }
+  const subscribed = await graph('/me/subscribed_apps', token);
+  const rows = (subscribed.body.data as { subscribed_fields?: string[] }[] | undefined) ?? [];
+  return {
+    tokenValid: true,
+    username: typeof me.body.username === 'string' ? me.body.username : null,
+    subscribedFields: subscribed.ok ? rows.flatMap((row) => row.subscribed_fields ?? []) : null,
+    error: subscribed.ok ? null : graphError(subscribed.body),
+  };
+}
+
+/**
+ * Ask Instagram to forward DMs to us again, for every connected account.
+ *
+ * The one repair this view offers, because it is the one that is both common
+ * and harmless: subscribing an account that is already subscribed changes
+ * nothing.
+ */
+export async function resubscribeInstagram(): Promise<{ username: string | null; ok: boolean; error: string | null }[]> {
+  const results: { username: string | null; ok: boolean; error: string | null }[] = [];
+  for (const tenantId of await listActiveTenantIds()) {
+    const tokens = await withTenant(tenantId, (db) =>
+      db
+        .select({ token: channelAccounts.accessToken })
+        .from(channelAccounts)
+        .where(
+          and(
+            eq(channelAccounts.tenantId, db.tenantId),
+            eq(channelAccounts.channel, 'instagram'),
+            eq(channelAccounts.isActive, true),
+          ),
+        )
+        .limit(10),
+    );
+    for (const { token } of tokens) {
+      if (!token) continue;
+      const done = await graph('/me/subscribed_apps?subscribed_fields=messages', token, { method: 'POST' });
+      const me = await graph('/me?fields=username', token);
+      results.push({
+        username: typeof me.body.username === 'string' ? me.body.username : null,
+        ok: done.ok && done.body.success !== false,
+        error: done.ok ? null : graphError(done.body),
+      });
+    }
+  }
+  return results;
 }

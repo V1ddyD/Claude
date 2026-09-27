@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { channelDiagnostics } from '@/server/channels/diagnostics';
+import { channelDiagnostics, resubscribeInstagram } from '@/server/channels/diagnostics';
 import { env } from '@/server/config/env';
 
 export const runtime = 'nodejs';
@@ -28,6 +28,21 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error('[diagnostics]', error);
     return NextResponse.json({ error: 'Diagnostics failed.' }, { status: 500 });
+  }
+}
+
+/** Re-subscribes connected Instagram accounts to message webhooks. */
+export async function POST(request: NextRequest) {
+  const expected = env.DIAGNOSTICS_TOKEN;
+  const supplied = request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
+  if (!expected || !matches(supplied, expected)) {
+    return NextResponse.json({ error: 'Not found.' }, { status: 404 });
+  }
+  try {
+    return NextResponse.json({ resubscribed: await resubscribeInstagram() });
+  } catch (error) {
+    console.error('[diagnostics]', error);
+    return NextResponse.json({ error: 'Resubscribe failed.' }, { status: 500 });
   }
 }
 
