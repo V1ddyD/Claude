@@ -909,6 +909,15 @@ function slotsCall(m: Memory, digest: Digest, now: Date): ToolCall {
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
+/** The Saturday and Sunday after this one: never today, even on a Saturday. */
+function nextWeekend(now: Date, timezone: string): { fromDate: string; toDate: string } {
+  const today = WEEKDAYS.indexOf(
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'long' }).format(now).toLowerCase(),
+  );
+  const saturday = (6 - today + 7) % 7 || 7;
+  return { fromDate: localDate(now, timezone, saturday), toDate: localDate(now, timezone, saturday + 1) };
+}
+
 function requestedWindow(
   said: string,
   now: Date,
@@ -924,8 +933,11 @@ function requestedWindow(
   if (/\b(today|tonight|later today)\b/.test(lower)) return { fromDate: day(0), toDate: day(0) };
   if (/\b(tomorrow|tmrw|tmr|esok)\b/.test(lower)) return { fromDate: day(1), toDate: day(1) };
   if (/\b(weekend|wkend)\b/.test(lower)) {
-    const saturday = today === 0 ? -1 : until(6);
-    return { fromDate: day(Math.max(0, saturday)), toDate: day(saturday + 1) };
+    // On a Sunday, "this weekend" is what is left of today. If that is
+    // nothing, the widened search looks at the next weekend (bookingTurn).
+    if (today === 0) return { fromDate: day(0), toDate: day(0) };
+    const saturday = until(6);
+    return { fromDate: day(saturday), toDate: day(saturday + 1) };
   }
   if (/\bnext week\b/.test(lower)) {
     const monday = until(1) || 7;
@@ -1469,12 +1481,16 @@ function bookingTurn(turn: Turn, steps: Step[]): Decision {
   const widened = lookups.length > 1;
   if (slots.length === 0 && !widened) {
     const input = lookups[0]?.input ?? {};
-    const fortnight = { fromDate: localDate(now, digest.timezone), toDate: localDate(now, digest.timezone, 14) };
-    if (input.fromDate !== fortnight.fromDate || input.toDate !== fortnight.toDate) {
+    // A weekend with nothing left is widened to the next weekend, not to a
+    // fortnight of weekdays the customer did not ask about.
+    const wider = [...m.said].reverse().some((said) => /\b(weekend|wkend)\b/i.test(said))
+      ? nextWeekend(now, digest.timezone)
+      : { fromDate: localDate(now, digest.timezone), toDate: localDate(now, digest.timezone, 14) };
+    if (input.fromDate !== wider.fromDate || input.toDate !== wider.toDate) {
       return call(
         t('getAvailableTestDriveSlots', {
           ...(m.modelSlug ? { modelSlug: m.modelSlug } : {}),
-          ...fortnight,
+          ...wider,
         }),
       );
     }

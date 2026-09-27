@@ -306,3 +306,51 @@ export const ROLE_NAMES: Record<StaffRole, string> = {
   service: 'service staff',
 };
 
+
+/**
+ * The operator's tool: give a business an owner who can sign in.
+ *
+ * Used when a business is set up, and when an owner is locked out. Creates
+ * the owner, or restores and promotes the person with that email, and returns
+ * a temporary password they must replace at first sign-in. Not limited by
+ * the package's accounts: every business needs one owner to manage the rest.
+ */
+export async function provisionOwner(
+  db: TenantDb,
+  input: { email: string; fullName: string },
+): Promise<{ ok: true; email: string; temporaryPassword: string } | { ok: false; message: string }> {
+  const parsed = z
+    .object({
+      email: z.string().trim().toLowerCase().email().max(254),
+      fullName: z.string().trim().min(1).max(80),
+    })
+    .safeParse(input);
+  if (!parsed.success) return { ok: false, message: 'A valid email and name are required.' };
+  const email = normaliseEmail(parsed.data.email);
+
+  const [existing] = await db
+    .select({ id: staffUsers.id })
+    .from(staffUsers)
+    .where(and(eq(staffUsers.tenantId, db.tenantId), eq(staffUsers.email, email)))
+    .limit(1);
+  const id = existing?.id ?? randomUUID();
+  if (existing) {
+    await db
+      .update(staffUsers)
+      .set({ role: 'admin', status: 'active', fullName: parsed.data.fullName })
+      .where(and(eq(staffUsers.tenantId, db.tenantId), eq(staffUsers.id, id)));
+  } else {
+    await db.insert(staffUsers).values({
+      id, tenantId: db.tenantId, email, fullName: parsed.data.fullName, role: 'admin', status: 'active',
+    });
+  }
+  const password = temporaryPassword();
+  await setTemporaryPassword(db, id, email, password);
+  await recordAudit(db, {
+    actor: { type: 'system' },
+    action: 'staff.owner_provisioned',
+    entityType: 'staff_user',
+    entityId: id,
+  });
+  return { ok: true, email, temporaryPassword: password };
+}

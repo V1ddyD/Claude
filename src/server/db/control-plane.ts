@@ -53,3 +53,22 @@ export async function listActiveTenantIds(): Promise<string[]> {
     await sql.end({ timeout: 5 });
   }
 }
+
+/**
+ * A business's id from its slug, for the operator's own tools.
+ *
+ * Unlike devTenantIdBySlug this works in production, which is why nothing
+ * reachable by a customer or a member of staff calls it: only endpoints that
+ * already required the operator's token.
+ */
+export async function operatorTenantIdBySlug(slug: string): Promise<string | null> {
+  const url = env.DATABASE_ADMIN_URL ?? env.DATABASE_URL;
+  const sql = postgres(url, { max: 1, onnotice: () => {} });
+  try {
+    await sql`SET row_security = off`;
+    const rows = await sql<{ id: string }[]>`SELECT id FROM tenants WHERE slug = ${slug} LIMIT 1`;
+    return rows[0]?.id ?? null;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}

@@ -1,17 +1,11 @@
 import { redirect } from 'next/navigation';
 import { cookies, headers } from 'next/headers';
-import { and, asc, eq } from 'drizzle-orm';
 import {
-  currentSessionToken, demoSignIn, getAuthSubject, SESSION_COOKIE, sessionCookieOptions,
+  currentSessionToken, getAuthSubject, SESSION_COOKIE, sessionCookieOptions,
 } from '@/server/auth/session';
-import { signIn, startSession } from '@/server/auth/staff-auth';
-import { verifyDemoPassword } from '@/server/auth/demo-portal';
-import { resolveTenantByHost } from '@/server/context/tenant';
-import { withTenant } from '@/server/db/tenant-db';
-import { staffUsers } from '@/server/db/schema';
+import { signIn } from '@/server/auth/staff-auth';
+import { configuredProviders, PROVIDER_NAMES, type Provider } from '@/server/auth/oauth';
 import { features } from '@/server/config/env';
-import { checkRateLimit } from '@/server/services/limits';
-import { createHash } from 'node:crypto';
 
 /**
  * Never prerendered. The portal is per-request by nature: it reads a session
@@ -24,37 +18,30 @@ export const metadata = { title: 'Sign in' };
 /**
  * Staff sign-in.
  *
- * Every business signs in here, with an email and a password; which business
- * they see is decided by the account, never by the address. On a
- * demonstration deployment the demonstration business's staff are also
- * offered as one-click accounts, behind the demonstration password, and only
- * that business's: a client's staff are never listed on a public page.
+ * Every business signs in here, with an email and password or with Google,
+ * Facebook or Apple; which business they see is decided by the account, never
+ * by the address. A provider button appears only when that provider is fully
+ * set up. Nothing on this page lists anybody's staff.
  */
 
-/** What a rejected sign-in is told. Never which part was wrong. */
+/** What a rejected sign-in is told. By code, from this list only. */
 const ERRORS: Record<string, string> = {
   invalid: "That email and password don't match an account.",
   rate_limited: 'Too many attempts. Please wait 15 minutes and try again.',
-  'wrong-password': 'That demonstration password was not right.',
-  'unknown-account': 'That account is no longer available. Choose another.',
+  no_account:
+    "That email isn't on a business account here. Ask the owner of your business to add you on their Team page, using the same email.",
+  no_email: "We couldn't get an email address from that account. Try another way to sign in.",
+  unverified: "That account's email address hasn't been verified yet. Verify it with the provider, or sign in with your password.",
+  private_relay:
+    "Apple hid your email address, so we can't match it to your business. Sign in with Apple again and choose Share My Email.",
+  cancelled: 'Sign-in was cancelled or took too long. Please try again.',
+  provider_error: "Something went wrong signing in there. Please try again, or use your email and password.",
+  unavailable: "That sign-in option isn't available.",
 };
 
 async function clientAddress(): Promise<string | null> {
   const list = await headers();
   return list.get('x-forwarded-for')?.split(',')[0]?.trim() ?? list.get('x-real-ip');
-}
-
-async function setSession(token: string) {
-  (await cookies()).set(SESSION_COOKIE, token, sessionCookieOptions);
-}
-
-/** The business this address belongs to, for the demonstration accounts only. */
-async function hostTenantId(): Promise<string | null> {
-  try {
-    return (await resolveTenantByHost((await headers()).get('host'))).id;
-  } catch {
-    return null;
-  }
 }
 
 export default async function SignInPage({
@@ -93,55 +80,11 @@ export default async function SignInPage({
     if (!result.ok) redirect(`/portal/sign-in?error=${result.reason}`);
     // Anything left over from an earlier sign-in on this browser ends here.
     if (await currentSessionToken()) (await cookies()).delete(SESSION_COOKIE);
-    await setSession(result.token);
+    (await cookies()).set(SESSION_COOKIE, result.token, sessionCookieOptions);
     redirect(result.mustChangePassword ? '/portal/set-password' : '/portal');
   }
 
-  const demoTenant = demoSignIn.enabled ? await hostTenantId() : null;
-  const demoAccounts = demoTenant
-    ? await withTenant(demoTenant, (db) =>
-        db
-          .select({ id: staffUsers.id, fullName: staffUsers.fullName, role: staffUsers.role })
-          .from(staffUsers)
-          .where(and(eq(staffUsers.tenantId, db.tenantId), eq(staffUsers.status, 'active')))
-          .orderBy(asc(staffUsers.role), asc(staffUsers.fullName))
-          .limit(12),
-      )
-    : [];
-
-  async function signInAsDemo(formData: FormData) {
-    'use server';
-    if (!demoSignIn.enabled) redirect('/portal/sign-in');
-    // The demonstration password is guessable at the same speed as any other.
-    const limit = await checkRateLimit({
-      bucket: 'demo-sign-in',
-      subject: createHash('sha256').update((await clientAddress()) ?? 'unknown').digest('hex').slice(0, 32),
-      max: 10,
-      windowSeconds: 900,
-    });
-    if (!limit.allowed) redirect('/portal/sign-in?error=rate_limited');
-    // The picker is public; the sign-in is not. Checked here, in constant time,
-    // on every submission: the form being rendered proves nothing.
-    if (features.demoPortal && !verifyDemoPassword(String(formData.get('password') ?? ''))) {
-      redirect('/portal/sign-in?error=wrong-password');
-    }
-    const tenantId = await hostTenantId();
-    if (!tenantId) redirect('/portal/sign-in?error=unknown-account');
-    const id = String(formData.get('id') ?? '');
-    // Re-read server-side, inside the demonstration business: a posted id for
-    // anyone else, or a removed account, produces nothing.
-    const token = await withTenant(tenantId, async (db) => {
-      const [staff] = await db
-        .select({ id: staffUsers.id })
-        .from(staffUsers)
-        .where(and(eq(staffUsers.tenantId, db.tenantId), eq(staffUsers.id, id), eq(staffUsers.status, 'active')))
-        .limit(1);
-      return staff ? startSession(db, staff.id) : null;
-    }).catch(() => null);
-    if (!token) redirect('/portal/sign-in?error=unknown-account');
-    await setSession(token);
-    redirect('/portal');
-  }
+  const providers = configuredProviders();
 
   return (
     <Frame>
@@ -152,6 +95,21 @@ export default async function SignInPage({
         >
           {error}
         </p>
+      )}
+
+      {providers.length > 0 && (
+        <>
+          <div className="space-y-3">
+            {providers.map((provider) => (
+              <ProviderButton key={provider} provider={provider} />
+            ))}
+          </div>
+          <div className="my-6 flex items-center gap-3 text-xs text-ink-500">
+            <span className="h-px flex-1 bg-ink-100" />
+            or sign in with email
+            <span className="h-px flex-1 bg-ink-100" />
+          </div>
+        </>
       )}
 
       <form action={signInWithPassword} className="space-y-4">
@@ -182,46 +140,50 @@ export default async function SignInPage({
           Forgotten your password? Ask the owner of your business account to reset it.
         </p>
       </form>
-
-      {demoAccounts.length > 0 && (
-        <section className="mt-10">
-          <h2 className="text-[11px] uppercase tracking-[0.2em] text-ink-500">Demonstration accounts</h2>
-          <p className="mt-2 text-sm text-ink-500">
-            {features.demoPortal
-              ? 'See the portal as a member of the demonstration showroom would. Everything here is fictional.'
-              : 'Development sign-in: seeded staff, with their real roles and permissions.'}
-          </p>
-          <ul className="mt-4 divide-y divide-ink-100 border-y border-ink-100">
-            {demoAccounts.map((account) => (
-              <li key={account.id}>
-                <form action={signInAsDemo}>
-                  <input type="hidden" name="id" value={account.id} />
-                  {features.demoPortal && (
-                    <input
-                      type="password"
-                      name="password"
-                      required
-                      placeholder="Demonstration password"
-                      aria-label={`Demonstration password to sign in as ${account.fullName}`}
-                      className="mt-3 w-full border border-ink-100 px-3 py-2 text-sm"
-                    />
-                  )}
-                  <button
-                    type="submit"
-                    className="flex w-full items-center justify-between py-3 text-left hover:bg-ink-50"
-                  >
-                    <span className="text-sm text-ink-900">{account.fullName}</span>
-                    <span className="text-[11px] uppercase tracking-wider text-ink-500">
-                      {account.role === 'admin' ? 'owner' : account.role}
-                    </span>
-                  </button>
-                </form>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
     </Frame>
+  );
+}
+
+/** A provider button, styled the way each provider asks its buttons to look. */
+function ProviderButton({ provider }: { provider: Provider }) {
+  const styles: Record<Provider, string> = {
+    google: 'border border-ink-100 bg-white text-ink-900 hover:bg-ink-50',
+    facebook: 'bg-[#1877F2] text-white hover:bg-[#166FE5]',
+    apple: 'bg-black text-white hover:bg-ink-800',
+  };
+  return (
+    <a
+      href={`/api/auth/${provider}/start`}
+      className={`flex w-full items-center justify-center gap-3 py-2.5 text-sm ${styles[provider]}`}
+    >
+      <ProviderLogo provider={provider} />
+      Continue with {PROVIDER_NAMES[provider]}
+    </a>
+  );
+}
+
+function ProviderLogo({ provider }: { provider: Provider }) {
+  if (provider === 'google') {
+    return (
+      <svg aria-hidden width="18" height="18" viewBox="0 0 48 48">
+        <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+        <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+        <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+        <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+      </svg>
+    );
+  }
+  if (provider === 'facebook') {
+    return (
+      <svg aria-hidden width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M24 12.07C24 5.41 18.63 0 12 0S0 5.41 0 12.07C0 18.1 4.39 23.1 10.13 24v-8.44H7.08v-3.49h3.05V9.41c0-3.02 1.79-4.7 4.53-4.7 1.31 0 2.68.24 2.68.24v2.97h-1.51c-1.49 0-1.95.93-1.95 1.88v2.27h3.33l-.53 3.49h-2.8V24C19.61 23.1 24 18.1 24 12.07z" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden width="16" height="18" viewBox="0 0 17 20" fill="currentColor">
+      <path d="M14.1 10.6c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.8-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.4.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9 0 0-2.7-1-2.6-4.1zM11.6 3c.7-.9 1.2-2 1-3.2-1 0-2.3.7-3 1.6-.7.8-1.2 2-1.1 3.1 1.2.1 2.3-.6 3.1-1.5z" />
+    </svg>
   );
 }
 

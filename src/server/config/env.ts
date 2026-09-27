@@ -91,6 +91,24 @@ const schema = z.object({
   CRON_SECRET: z.string().optional(),
   /** Unlocks /api/admin/diagnostics. Unset, the endpoint does not exist. */
   DIAGNOSTICS_TOKEN: z.string().min(32).optional(),
+  /** Unlocks /api/admin/owners, which creates a business's owner login. Unset, it does not exist. */
+  OPERATOR_TOKEN: z.string().min(32).optional(),
+
+  /**
+   * Sign in with Google, Facebook and Apple. Each button appears only when its
+   * provider is fully configured, so a half-set-up provider never shows a
+   * button that fails.
+   */
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  FACEBOOK_APP_ID: z.string().optional(),
+  FACEBOOK_APP_SECRET: z.string().optional(),
+  /** The Services ID, not the App ID. */
+  APPLE_CLIENT_ID: z.string().optional(),
+  APPLE_TEAM_ID: z.string().optional(),
+  APPLE_KEY_ID: z.string().optional(),
+  /** The .p8 key's contents. Newlines may be written as \n. */
+  APPLE_PRIVATE_KEY: z.string().optional(),
 
   /**
    * A publicly reachable demonstration deployment.

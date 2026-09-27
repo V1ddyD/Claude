@@ -99,9 +99,3 @@ export async function currentSessionToken(): Promise<string | undefined> {
   return (await cookies()).get(SESSION_COOKIE)?.value;
 }
 
-/** Whether the demonstration picker may be offered on this deployment. */
-export const demoSignIn = {
-  get enabled() {
-    return !features.supabaseAuth && (!isProduction || features.demoPortal);
-  },
-};

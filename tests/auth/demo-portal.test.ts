@@ -122,15 +122,12 @@ describe('configuration', () => {
 });
 
 describe('the pages', () => {
-  it('ask for the password and never render it', async () => {
+  it('sign in by email and password or a provider, and list nobody', async () => {
     const signIn = readFileSync('src/app/(portal)/portal/sign-in/page.tsx', 'utf8');
-    expect(signIn).toContain('verifyDemoPassword');
     expect(signIn).toMatch(/type="password"/);
-    expect(signIn).not.toMatch(/DEMO_PORTAL_PASSWORD/);
-    // The account is still re-read inside the demonstration business, so a
-    // posted id cannot invent a session, or one for anyone else's staff.
-    expect(signIn).toMatch(/eq\(staffUsers\.id, id\)/);
-    expect(signIn).toContain('hostTenantId');
+    expect(signIn).toContain('configuredProviders');
+    // No staff directory on a public page, and no one-click accounts.
+    expect(signIn).not.toMatch(/staffUsers|DEMO_PORTAL_PASSWORD|Demonstration accounts/);
   });
 
   it('tell a visitor the site is a demonstration', async () => {
@@ -139,10 +136,6 @@ describe('the pages', () => {
     expect(layout).toMatch(/not a real appointment/i);
   });
 
-  it('offer the demonstration accounts only on a demonstration or development deployment', async () => {
-    const session = readFileSync('src/server/auth/session.ts', 'utf8');
-    expect(session).toContain('(!isProduction || features.demoPortal)');
-  });
 
   it('no longer trust a cookie that names a staff member', async () => {
     const session = readFileSync('src/server/auth/session.ts', 'utf8');

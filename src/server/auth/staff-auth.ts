@@ -175,17 +175,6 @@ export async function endSession(token: string | undefined): Promise<void> {
   );
 }
 
-/** A session for a staff member already vouched for: the demonstration picker. */
-export async function startSession(db: TenantDb, staffId: string): Promise<string> {
-  const token = randomBytes(32).toString('base64url');
-  await db.insert(staffSessions).values({
-    tenantId: db.tenantId,
-    staffId,
-    tokenHash: sha256(token),
-    expiresAt: new Date(Date.now() + SESSION_DAYS * 86_400_000),
-  });
-  return token;
-}
 
 /** Signs somebody out everywhere, except the session `keepToken` belongs to. */
 export async function revokeSessions(db: TenantDb, staffId: string, keepToken?: string): Promise<void> {
@@ -279,4 +268,57 @@ export async function changeOwnPassword(
     });
   await revokeSessions(db, staff.authUserId, input.keepToken);
   return { ok: true };
+}
+
+/**
+ * A session for an email a provider (Google, Facebook, Apple) has verified.
+ *
+ * Only for someone already on a team: the provider proves who they are, the
+ * business decides whether they are let in. When they had a temporary
+ * password waiting to be replaced, it is removed rather than left working,
+ * because the person who set it has seen it; they can choose a password of
+ * their own later from their account.
+ */
+export async function signInWithVerifiedEmail(
+  verifiedEmail: string,
+  ip?: string | null,
+): Promise<{ ok: true; token: string } | { ok: false; reason: 'no_account' | 'rate_limited' }> {
+  const email = normaliseEmail(verifiedEmail);
+  const limit = await checkRateLimit({
+    bucket: 'sign-in-ip',
+    subject: sha256(ip ?? 'unknown').slice(0, 32),
+    max: 30,
+    windowSeconds: 900,
+  });
+  if (!limit.allowed) return { ok: false, reason: 'rate_limited' };
+
+  return withSignInLookup({ email }, async (tx, enterTenant) => {
+    const people = await tx
+      .select({ id: staffUsers.id, tenantId: staffUsers.tenantId })
+      .from(staffUsers)
+      .where(and(eq(staffUsers.email, email), eq(staffUsers.status, 'active')))
+      .orderBy(staffUsers.createdAt)
+      .limit(5);
+    const person = people[0];
+    if (!person) return { ok: false, reason: 'no_account' } as const;
+
+    await enterTenant(person.tenantId, person.id);
+    await tx
+      .delete(staffCredentials)
+      .where(
+        and(
+          eq(staffCredentials.tenantId, person.tenantId),
+          eq(staffCredentials.staffId, person.id),
+          eq(staffCredentials.mustChangePassword, true),
+        ),
+      );
+    const token = randomBytes(32).toString('base64url');
+    await tx.insert(staffSessions).values({
+      tenantId: person.tenantId,
+      staffId: person.id,
+      tokenHash: sha256(token),
+      expiresAt: new Date(Date.now() + SESSION_DAYS * 86_400_000),
+    });
+    return { ok: true, token } as const;
+  });
 }
