@@ -108,7 +108,6 @@ export default [
       // owner connection. Each is a single, named module with a comment saying
       // why — the rule exists so a fourth one cannot appear unnoticed.
       'src/server/db/control-plane.ts',
-      'src/server/auth/dev-directory.ts',
       // Migrating and seeding a managed database the application is the only
       // thing that can reach. Runs as the owner because migrations create
       // roles and policies and seeding precedes any tenant context.

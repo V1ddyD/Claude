@@ -11,7 +11,10 @@ import { NextResponse, type NextRequest } from 'next/server';
  * Treating this file as the security boundary is the classic Next.js mistake:
  * it can be bypassed, and it cannot express per-permission rules.
  */
-const SESSION_COOKIES = ['sinclair_dev_staff', 'sb-access-token'];
+// Presence only: whether to bother rendering the portal at all. Whether the
+// session is real is decided on the server, against the database, by every
+// page (requireStaff). A forged cookie gets past this line and no further.
+const SESSION_COOKIES = ['__Host-portal_session', 'portal_session', 'sb-access-token'];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

@@ -37,6 +37,29 @@ export const staffUsers = pgTable(
   (t) => [unique().on(t.tenantId, t.email)],
 );
 
+/** A staff member's password, as a scrypt hash. Never the password itself. */
+export const staffCredentials = pgTable('staff_credentials', {
+  staffId: uuid('staff_id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  email: citext('email').notNull(),
+  passwordHash: text('password_hash').notNull(),
+  mustChangePassword: boolean('must_change_password').notNull().default(true),
+  failedAttempts: integer('failed_attempts').notNull().default(0),
+  lockedUntil: timestamp('locked_until', { withTimezone: true }),
+  passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** A signed-in browser. The cookie holds a token; this holds its SHA-256. */
+export const staffSessions = pgTable('staff_sessions', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: uuid('tenant_id').notNull(),
+  staffId: uuid('staff_id').notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+});
+
 export const customers = pgTable(
   'customers',
   {

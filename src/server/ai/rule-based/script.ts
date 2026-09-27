@@ -1499,8 +1499,11 @@ function bookingTurn(turn: Turn, steps: Step[]): Decision {
     );
   }
 
-  const narrowed = narrowSlots(slots, m, turn);
-  const chosen = narrowed.length === 1 ? narrowed[0]! : undefined;
+  const { slots: narrowed, pinned } = narrowSlots(slots, m, turn);
+  // Booked only when the customer chose it: picked it from the list, or named
+  // its time. "Sunday" with one time left on Sunday is an offer of that time,
+  // not a booking the customer never agreed to.
+  const chosen = pinned && narrowed.length === 1 ? narrowed[0]! : undefined;
 
   if (!chosen) {
     const model = m.modelSlug ? ` for the ${modelShortName(m, digest)}` : '';
@@ -1511,7 +1514,7 @@ function bookingTurn(turn: Turn, steps: Step[]): Decision {
               `Nothing's free then, I'm afraid. Here are the nearest times I have${model}:`,
               `That day's not available, sorry. These are the next free slots${model}:`,
             ])
-          : narrowed.length > 1
+          : narrowed.length > 0
           ? v.pick('slots:narrowed', [`Here's what's free then${model}:`, `These times work then${model}:`])
           : v.pick('slots:lead', [
               `${v.pick('slots:opener', ['Lovely!', 'Brilliant!', 'Great choice!'])} Here are the next available times${model}:`,
@@ -1592,22 +1595,32 @@ function spread(slots: Slot[]): Slot[] {
  * three Saturday slots is a narrowing, not a choice, and booking one of them
  * would be inventing a decision the customer never made.
  */
-function narrowSlots(slots: Slot[], m: Memory, turn: Turn): Slot[] {
+/** A clock time, as a customer types one: "3pm", "10:30 am". */
+const NAMED_TIME = /\b\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)/i;
+
+/**
+ * The offered times that fit what the customer asked for, and whether they
+ * pinned one down (picked it, or named its time) rather than only a day.
+ */
+function narrowSlots(slots: Slot[], m: Memory, turn: Turn): { slots: Slot[]; pinned: boolean } {
   if (m.chosenSlotLabel) {
     // If the time they picked has since been taken, this is empty and the
     // customer is asked again rather than booked into a different slot.
-    return slots.filter(
-      (slot) => slot.label === m.chosenSlotLabel || shortLabel(slot.label) === m.chosenSlotLabel,
-    );
+    return {
+      slots: slots.filter(
+        (slot) => slot.label === m.chosenSlotLabel || shortLabel(slot.label) === m.chosenSlotLabel,
+      ),
+      pinned: true,
+    };
   }
 
   for (const said of [...m.said].reverse()) {
     const matched = slots.filter((slot) => saidMatchesSlot(slot.label, said));
-    if (matched.length > 0) return matched;
+    if (matched.length > 0) return { slots: matched, pinned: NAMED_TIME.test(said) };
     const relative = relativeSlots(said, slots, turn);
-    if (relative.length > 0) return relative;
+    if (relative.length > 0) return { slots: relative, pinned: false };
   }
-  return [];
+  return { slots: [], pinned: false };
 }
 
 /**

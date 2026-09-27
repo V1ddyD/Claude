@@ -170,3 +170,41 @@ export async function withoutTenantScope<T>(
   // owner, which is the one place that posture is looser than the design.
   return fn(unscopedDb);
 }
+
+/**
+ * Run `fn` able to see only the sign-in rows one value names.
+ *
+ * Sign-in and session recognition both happen before anyone's business is
+ * known: the email a person types, or the token their browser sends, is what
+ * DETERMINES it. The row-level policies on `staff_credentials` and
+ * `staff_sessions` let this transaction see the rows for that one email, or
+ * that one token, and nothing else. `enterTenant` then scopes the rest of the
+ * transaction to the business that turned out to own them.
+ */
+export async function withSignInLookup<T>(
+  lookup: { email: string } | { tokenHash: string },
+  fn: (db: DrizzleTx, enterTenant: (tenantId: string, authUserId?: string) => Promise<void>) => Promise<T>,
+): Promise<T> {
+  await ensureSchema();
+  return unscopedDb.transaction(async (tx) => {
+    await assumeRequestRole(tx);
+    if ('email' in lookup) {
+      await tx.execute(sql`select set_config('app.login_email', ${lookup.email}, true)`);
+    } else {
+      await tx.execute(sql`select set_config('app.session_token_hash', ${lookup.tokenHash}, true)`);
+    }
+    const enterTenant = async (tenantId: string, authUserId?: string) => {
+      if (!uuid.safeParse(tenantId).success) {
+        throw new AppError('TENANT_NOT_RESOLVED', 'Invalid tenant context.', { internal: { tenantId } });
+      }
+      await tx.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
+      if (authUserId) {
+        if (!uuid.safeParse(authUserId).success) {
+          throw new AppError('UNAUTHENTICATED', 'Invalid session.', { internal: { authUserId } });
+        }
+        await tx.execute(sql`select set_config('app.auth_user_id', ${authUserId}, true)`);
+      }
+    };
+    return fn(tx, enterTenant);
+  });
+}

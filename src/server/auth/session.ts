@@ -1,5 +1,7 @@
 import 'server-only';
 import { cookies } from 'next/headers';
+import { cache } from 'react';
+import { sessionSubject, SESSION_DAYS, type SessionSubject } from './staff-auth';
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { env, features, isProduction } from '@/server/config/env';
 
@@ -15,10 +17,12 @@ import { env, features, isProduction } from '@/server/config/env';
 export interface AuthSubject {
   authUserId: string;
   email: string;
+  /** Signed in with a password somebody else chose, which must be replaced first. */
+  mustChangePassword?: boolean;
 }
 
 export async function getAuthSubject(): Promise<AuthSubject | null> {
-  return features.supabaseAuth ? supabaseSubject() : devSubject();
+  return features.supabaseAuth ? supabaseSubject() : portalSubject();
 }
 
 async function supabaseSubject(): Promise<AuthSubject | null> {
@@ -58,36 +62,46 @@ async function supabaseSubject(): Promise<AuthSubject | null> {
  * identity provider, not the permission model. It refuses to run in production
  * unless the deployment is an explicitly flagged, password-gated demonstration.
  */
-const DEV_COOKIE = 'sinclair_dev_staff';
+/**
+ * The portal session cookie.
+ *
+ * A random token, meaningless on its own: the database holds its SHA-256 and
+ * decides who it belongs to, so it cannot be forged by editing it, and it
+ * stops working the moment the session is ended. `__Host-` in production
+ * pins it to this host, HTTPS only and the whole site, so no subdomain or
+ * plain-HTTP page can set or read it.
+ */
+export const SESSION_COOKIE = isProduction ? '__Host-portal_session' : 'portal_session';
 
-async function devSubject(): Promise<AuthSubject | null> {
-  // Refused in production, with one exception: a deployment that has declared
-  // itself a demonstration and set a portal password. The sign-in page will
-  // not issue this cookie until that password has been supplied, so the
-  // adapter is behind a gate rather than open.
-  if (isProduction && !features.demoPortal) {
-    throw new Error(
-      'Supabase auth is not configured and the development auth adapter ' +
-        'cannot be used in production. Set NEXT_PUBLIC_SUPABASE_URL and ' +
-        'NEXT_PUBLIC_SUPABASE_ANON_KEY, or DEMO_MODE=true with ' +
-        'DEMO_PORTAL_PASSWORD for a demonstration deployment.',
-    );
-  }
-  const cookieStore = await cookies();
-  const raw = cookieStore.get(DEV_COOKIE)?.value;
-  if (!raw) return null;
-  const [authUserId, email] = raw.split('|');
-  if (!authUserId || !email) return null;
-  return { authUserId, email };
+export const sessionCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: 'lax' as const,
+  path: '/',
+  maxAge: SESSION_DAYS * 86_400,
+};
+
+/** Once per request, however many components ask. */
+const currentSession = cache(async (): Promise<SessionSubject | null> => {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  return sessionSubject(token);
+});
+
+async function portalSubject(): Promise<AuthSubject | null> {
+  const session = await currentSession();
+  return session
+    ? { authUserId: session.authUserId, email: session.email, mustChangePassword: session.mustChangePassword }
+    : null;
 }
 
-export const devAuth = {
-  cookieName: DEV_COOKIE,
-  encode: (authUserId: string, email: string) => `${authUserId}|${email}`,
+/** The raw token, for ending this session or keeping it while ending the others. */
+export async function currentSessionToken(): Promise<string | undefined> {
+  return (await cookies()).get(SESSION_COOKIE)?.value;
+}
+
+/** Whether the demonstration picker may be offered on this deployment. */
+export const demoSignIn = {
   get enabled() {
-    // Development, or an explicitly flagged demonstration deployment where the
-    // picker sits behind DEMO_PORTAL_PASSWORD. Never where a real identity
-    // provider is configured.
     return !features.supabaseAuth && (!isProduction || features.demoPortal);
   },
 };

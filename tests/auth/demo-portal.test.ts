@@ -127,8 +127,10 @@ describe('the pages', () => {
     expect(signIn).toContain('verifyDemoPassword');
     expect(signIn).toMatch(/type="password"/);
     expect(signIn).not.toMatch(/DEMO_PORTAL_PASSWORD/);
-    // The account is still re-read, so a posted id cannot invent a session.
-    expect(signIn).toContain('findDevAccount');
+    // The account is still re-read inside the demonstration business, so a
+    // posted id cannot invent a session, or one for anyone else's staff.
+    expect(signIn).toMatch(/eq\(staffUsers\.id, id\)/);
+    expect(signIn).toContain('hostTenantId');
   });
 
   it('tell a visitor the site is a demonstration', async () => {
@@ -137,8 +139,14 @@ describe('the pages', () => {
     expect(layout).toMatch(/not a real appointment/i);
   });
 
-  it('keep the staff adapter refused in production otherwise', async () => {
+  it('offer the demonstration accounts only on a demonstration or development deployment', async () => {
     const session = readFileSync('src/server/auth/session.ts', 'utf8');
-    expect(session).toContain('isProduction && !features.demoPortal');
+    expect(session).toContain('(!isProduction || features.demoPortal)');
+  });
+
+  it('no longer trust a cookie that names a staff member', async () => {
+    const session = readFileSync('src/server/auth/session.ts', 'utf8');
+    expect(session).not.toContain('sinclair_dev_staff');
+    expect(session).toContain('sessionSubject');
   });
 });

@@ -52,9 +52,9 @@ export const SINCLAIR_STAFF = {
 
 export async function seedSinclair(sql: Sql): Promise<void> {
   await sql`
-    INSERT INTO tenants (id, slug, legal_name, brand_name, timezone, currency, locale, ticket_prefix)
+    INSERT INTO tenants (id, slug, legal_name, brand_name, timezone, currency, locale, ticket_prefix, plan)
     VALUES (${SINCLAIR_TENANT_ID}, 'sinclair', 'Sinclair Motors (B) Sdn Bhd', 'Sinclair',
-            'Asia/Brunei', 'BND', 'en-GB', 'SIN')
+            'Asia/Brunei', 'BND', 'en-GB', 'SIN', 'elite')
     ON CONFLICT (id) DO UPDATE SET brand_name = EXCLUDED.brand_name
   `;
 

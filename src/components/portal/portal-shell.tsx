@@ -28,13 +28,14 @@ const NAV: NavItem[] = [
   { label: 'Leads', permission: 'lead.read.assigned', href: '/portal/leads' },
   { label: 'Appointments', permission: 'appointment.read', href: '/portal/appointments' },
   { label: 'Tickets', permission: 'customer.read', href: '/portal/tickets' },
+  { label: 'Team', permission: 'staff.manage', href: '/portal/team' },
 ];
 
 const ROLE_LABEL: Record<string, string> = {
   sales: 'Sales',
   service: 'Service',
   manager: 'Manager',
-  admin: 'Administrator',
+  admin: 'Owner',
 };
 
 export function PortalShell({
@@ -64,15 +65,19 @@ export function PortalShell({
             {brandName.toUpperCase()}
           </Link>
           <span className="hidden text-[11px] uppercase tracking-widest text-ink-500 sm:inline">
-            Dealer Portal
+            Business Portal
           </span>
 
-          <span className="ml-auto text-right leading-tight md:order-last md:ml-0 md:border-l md:border-ink-100 md:pl-5">
+          <Link
+            href="/portal/account"
+            title="My account"
+            className="ml-auto text-right leading-tight hover:opacity-80 md:order-last md:ml-0 md:border-l md:border-ink-100 md:pl-5"
+          >
             <span className="block text-sm text-ink-900">{staff.fullName}</span>
             <span className="block text-[11px] uppercase tracking-wider text-ink-500">
               {ROLE_LABEL[staff.role] ?? staff.role}
             </span>
-          </span>
+          </Link>
 
           <nav className="order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-5 overflow-x-auto px-4 pb-3 sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-6 md:order-none md:mx-0 md:ml-auto md:w-auto md:overflow-visible md:px-0 md:pb-0">
             {visible.map((item) => (

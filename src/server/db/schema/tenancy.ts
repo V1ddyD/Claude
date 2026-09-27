@@ -14,6 +14,8 @@ export const tenants = pgTable('tenants', {
   locale: text('locale').notNull().default('en-CA'),
   ticketPrefix: text('ticket_prefix').notNull().default('TKT'),
   status: text('status').notNull().default('active').$type<'active' | 'suspended' | 'onboarding'>(),
+  /** The package the business is on. Decides how many staff it may add. */
+  plan: text('plan').notNull().default('starter').$type<'starter' | 'pro' | 'elite'>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

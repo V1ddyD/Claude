@@ -31,6 +31,9 @@ export default async function PortalLayout({ children }: { children: React.React
     throw err;
   }
 
+  // A password somebody else chose opens nothing until it is replaced.
+  if (staff.mustChangePassword) redirect('/portal/set-password');
+
   const tenant = await getTenantById(staff.tenantId);
   return (
     <PortalShell staff={staff} brandName={tenant.brandName}>

@@ -26,6 +26,8 @@ export interface StaffContext {
   role: StaffRole;
   fullName: string;
   email: string;
+  /** Signed in with a password somebody else chose; the portal sends them to replace it. */
+  mustChangePassword?: boolean;
   can(permission: Permission): boolean;
   /** Throws FORBIDDEN unless the role holds the permission. */
   assert(permission: Permission): void;
@@ -66,6 +68,7 @@ export async function requireStaff(permission?: Permission): Promise<StaffContex
     role: staff.role,
     fullName: staff.fullName,
     email: staff.email,
+    mustChangePassword: subject.mustChangePassword ?? false,
     can: (p) => granted.has(p),
     assert: (p) => {
       if (!granted.has(p)) throw forbidden({ role: staff.role, needed: p });
