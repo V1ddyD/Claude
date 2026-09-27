@@ -89,6 +89,8 @@ const schema = z.object({
 
   SESSION_SECRET: z.string().min(32).optional(),
   CRON_SECRET: z.string().optional(),
+  /** Unlocks /api/admin/diagnostics. Unset, the endpoint does not exist. */
+  DIAGNOSTICS_TOKEN: z.string().min(32).optional(),
 
   /**
    * A publicly reachable demonstration deployment.
