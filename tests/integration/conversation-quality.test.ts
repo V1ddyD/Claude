@@ -336,3 +336,88 @@ describe('found by walking through the demo', () => {
     expect(slots.text).not.toMatch(/EDT|EST|GMT/);
   });
 });
+
+describe('small talk, within limits', () => {
+  it('tells a joke, and another when asked', async () => {
+    const say = chat();
+    const first = await say('tell me a joke');
+    expect(first.toolsUsed).toEqual([]);
+    expect(first.text).toMatch(/\?/);
+    const second = await say('another one');
+    expect(second.text).not.toBe(first.text);
+    expect(second.text).not.toMatch(/understood|catch what/i);
+  });
+
+  it('answers festive greetings and everyday chat warmly, then asks what it can help with', async () => {
+    for (const [message, pattern] of [
+      ['Selamat Hari Raya!', /thank you/i],
+      ['dah makan?', /eat|lunch|nasi/i],
+      ['so hot today', /hot|weather|air-con/i],
+    ] as const) {
+      const reply = await chat()(message);
+      expect.soft(reply.text, message).toMatch(pattern);
+      expect.soft(reply.text, message).toMatch(/help|car|range|looking/i);
+      expect.soft(reply.toolsUsed, message).toEqual([]);
+    }
+  });
+
+  it('steers back after a few off-topic messages, and never repeats itself doing it', async () => {
+    const say = chat();
+    const replies: string[] = [];
+    for (const message of ['tell me a joke', 'dah makan?', 'so hot today', 'are you single', 'do you like football', 'im bored']) {
+      replies.push((await say(message)).text);
+    }
+    // The third is nudged firmly, from the fourth only the menu.
+    expect(replies[2]).toMatch(/cars are really where I can help|if you're thinking about a car|best at helping/i);
+    for (const menu of replies.slice(3)) expect(menu).toMatch(/test drive/i);
+    for (let i = 1; i < replies.length; i++) expect(replies[i]).not.toBe(replies[i - 1]);
+    expect(replies.join('\n')).not.toMatch(/recap|moment ago/i);
+  });
+
+  it('answers the car question that follows, as normal', async () => {
+    const say = chat();
+    for (const message of ['tell me a joke', 'haha', 'are you single', 'im bored']) await say(message);
+    const back = await say('how much is the S5?');
+    expect(back.text).toMatch(/B\$56,400/);
+  });
+
+  it('does not do homework, essays, code or trivia', async () => {
+    for (const message of [
+      'write me an essay about climate change',
+      'what is the capital of france',
+      'can you help with my math homework',
+      'write code in python for a calculator',
+    ]) {
+      const reply = await chat()(message);
+      expect.soft(reply.toolsUsed, message).toEqual([]);
+      expect.soft(reply.text, message).toMatch(/can't help|not something I can help|outside what I can help|only set up for/i);
+      expect.soft(reply.text, message).not.toMatch(/Paris/);
+    }
+  });
+
+  it('does not mistake a car question for small talk', async () => {
+    const say = chat();
+    expect((await say('is the S5 good in hot weather?')).toolsUsed.length).toBeGreaterThan(0);
+    const family = await chat()('which car do you recommend for a family?');
+    expect(family.text).toMatch(/Sinclair/);
+    expect(family.text).not.toMatch(/virtual assistant|get back to the cars|where I can help/i);
+  });
+});
+
+describe('booking a day that is not in the next few days', () => {
+  it('remembers the day asked for when the customer picks a time', async () => {
+    // Six days out: past the first few days a general lookup shows, which is
+    // exactly where a forgotten "Saturday" used to lose the booking.
+    const sixDaysOut = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Brunei', weekday: 'long' }).format(
+      new Date(Date.now() + 6 * 86_400_000),
+    );
+    const say = chat();
+    const offered = await say(`can I test drive the S5 on ${sixDaysOut}?`);
+    const first = offered.text.split('\n').find((line) => /^1\./.test(line))!;
+    expect(first).toContain(sixDaysOut);
+
+    const picked = await say('the first one please');
+    expect(picked.text).toContain(first.replace(/^1\.\s*/, ''));
+    expect(picked.text).toMatch(/name/i);
+  });
+});

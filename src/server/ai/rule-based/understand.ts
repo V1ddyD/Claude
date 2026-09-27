@@ -1,4 +1,5 @@
 import { normalise, isSalam } from './normalise';
+import { smallTalkTopic, type SmallTalkTopic } from './small-talk';
 import { checkLanguage, withoutProfanity } from './moderation';
 
 /**
@@ -35,6 +36,7 @@ export type Intent =
   // The conversation itself.
   | 'greeting'
   | 'how_are_you'
+  | 'small_talk'
   | 'who_are_you'
   | 'thanks'
   | 'goodbye'
@@ -171,6 +173,8 @@ export interface Understanding {
   tradeInInterest?: boolean;
   negotiating?: boolean;
   justBrowsing?: boolean;
+  /** Set whenever the intent is 'small_talk': what the chat is about. */
+  smallTalk?: SmallTalkTopic;
 }
 
 /**
@@ -730,6 +734,13 @@ function classify(lower: string, parsed: Understanding, vocabulary?: Vocabulary)
   if (/\b(how much|prices?|pricing|costs?|msrp|starting at|starts at|otr|on the road)\b/.test(lower)) return 'price';
 
   // --- Small talk, once nothing substantive has claimed the message ---------
+  // Naming one of the cars makes it a question about the car, whatever else
+  // it mentions: "is the S5 good in hot weather?" is not a chat about the heat.
+  const chat = named === 0 ? smallTalkTopic(lower) : undefined;
+  if (chat) {
+    parsed.smallTalk = chat;
+    return 'small_talk';
+  }
   if (COMPLIMENT.test(lower)) return 'compliment';
   if (GOODBYE.test(lower)) return 'goodbye';
   if (THANKS.test(lower)) return 'thanks';

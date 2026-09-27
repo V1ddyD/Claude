@@ -8,6 +8,7 @@ import {
   type Voice,
 } from './voice';
 import { saidMatchesSlot } from './understand';
+import { smallTalkReply } from './small-talk';
 import {
   resolveTrim, resolvePowertrain, resolveColour,
   type ColourRow, type PowertrainRow, type TrimRow,
@@ -241,6 +242,14 @@ function openTurn(turn: Turn): Decision {
     // --- The conversation itself -------------------------------------------
     case 'greeting':
       return say(greeting(turn));
+
+    case 'small_talk':
+      return say(
+        smallTalkReply(m.latest.smallTalk ?? 'feeling_good', v, {
+          brand: digest.brandName,
+          streak: m.smallTalkStreak,
+        }),
+      );
 
     case 'how_are_you':
       return say(
@@ -879,13 +888,18 @@ function searchInput(m: Memory): Record<string, unknown> {
  * booked. Otherwise the next fortnight.
  */
 function slotsCall(m: Memory, digest: Digest, now: Date): ToolCall {
-  const named = requestedWindow(m.said.at(-1) ?? '', now, digest.timezone);
-  const previous = m.previousCalls.find((c) => c.name === 'getAvailableTestDriveSlots');
-  const window =
-    named ??
-    (previous && typeof previous.input.fromDate === 'string' && typeof previous.input.toDate === 'string'
-      ? { fromDate: previous.input.fromDate, toDate: previous.input.toDate }
-      : { fromDate: localDate(now, digest.timezone), toDate: localDate(now, digest.timezone, 14) });
+  // The day they asked for, from the most recent message that named one. Not
+  // the previous turn's tool call: those are not replayed between messages, so
+  // "Saturday" followed by "the first one" used to look up the next few days,
+  // miss Saturday, and offer the list again instead of booking it.
+  const named = [...m.said]
+    .reverse()
+    .map((said) => requestedWindow(said, now, digest.timezone))
+    .find(Boolean);
+  const window = named ?? {
+    fromDate: localDate(now, digest.timezone),
+    toDate: localDate(now, digest.timezone, 14),
+  };
 
   return t('getAvailableTestDriveSlots', {
     ...(m.modelSlug ? { modelSlug: m.modelSlug } : {}),

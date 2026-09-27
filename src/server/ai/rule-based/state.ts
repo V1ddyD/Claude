@@ -5,6 +5,7 @@ import {
   type Intent, type RankCriterion, type Timeframe, type TradeInVehicle, type Vocabulary,
 } from './understand';
 import { seedFrom, OFFER_DRIVE, OFFER_HUMAN, MORE_TAILS } from './voice';
+import { saidJoke, saidSmallTalk } from './small-talk';
 
 /**
  * What the conversation has established, read back out of the messages.
@@ -208,6 +209,12 @@ export interface Memory {
    * guess — a loop is worse than admitting it.
    */
   unsureStreak: number;
+  /**
+   * How many messages in a row, this one included, have been small talk,
+   * counted from the assistant's own replies so a "yes" to "want another
+   * joke?" counts too. Past a few, the chat is steered back to the cars.
+   */
+  smallTalkStreak: number;
   /** The previous turn's tools, for re-reading a list in full. */
   previousCalls: Call[];
   /** Set when the customer said yes to something the assistant offered. */
@@ -267,6 +274,7 @@ export function remember(
     tradeIn: {},
     abuseCount: 0,
     unsureStreak: unsureStreak(exchanges),
+    smallTalkStreak: smallTalkStreak(exchanges),
     previousCalls,
   };
 
@@ -428,6 +436,17 @@ export function remember(
   // message carries no intent of its own, the flow it is answering continues.
   if (bare && latest.intent !== 'goodbye' && asked && flows.length > 0 && isAsk(asked)) {
     memory.intent = flows.at(-1)!;
+    return memory;
+  }
+
+  // "Yes" or "another one" straight after a joke.
+  if (
+    saidJoke(asked) &&
+    NO_INTENT_OF_ITS_OWN.includes(latest.intent) &&
+    (latest.affirmative || /\b(another|one more|again|more)\b/.test(latest.normalised))
+  ) {
+    memory.intent = 'small_talk';
+    latest.smallTalk = 'joke';
     return memory;
   }
 
@@ -707,6 +726,16 @@ function acceptance(
   if (!asked || !turn.affirmative) return undefined;
   if (!NO_INTENT_OF_ITS_OWN.includes(turn.intent)) return undefined;
   return offerIn(asked);
+}
+
+/** Small-talk messages in a row, this one included, judged by what the assistant replied. */
+function smallTalkStreak(exchanges: Exchange[]): number {
+  let streak = 1;
+  for (const exchange of [...exchanges].reverse()) {
+    if (!saidSmallTalk(exchange.asked)) break;
+    streak += 1;
+  }
+  return streak;
 }
 
 /** How many of the assistant's latest replies, in a row, said it did not understand. */
