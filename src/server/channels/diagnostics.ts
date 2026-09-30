@@ -3,6 +3,7 @@ import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { withTenant, withoutTenantScope } from '@/server/db/tenant-db';
 import { listActiveTenantIds } from '@/server/db/control-plane';
 import { channelAccounts, channelInboundMessages, channelMessages } from '@/server/db/schema';
+import { drainChannelOutbox } from './outbox';
 
 /**
  * Is the messaging path working, and if not, which half is broken?
@@ -234,4 +235,94 @@ export async function resubscribeInstagram(): Promise<{ username: string | null;
     }
   }
   return results;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The hourly check                                                           */
+/* -------------------------------------------------------------------------- */
+
+export interface HealthReport {
+  ok: boolean;
+  checkedAt: string;
+  /** Plain-English problems a person needs to act on. Empty when all is well. */
+  problems: string[];
+  /** What the check fixed by itself. */
+  repaired: { repliesDelivered: number; resubscribed: number };
+}
+
+/**
+ * Deliver anything stuck, repair what can be repaired, report the rest.
+ *
+ * Run on a schedule so a broken link is found by us within the hour rather
+ * than by a customer who never got an answer. Repairs first: a reply that
+ * was waiting for a retry goes out now, and an account Instagram stopped
+ * forwarding messages for is re-subscribed. Only what is still wrong after
+ * that is reported, so a report always means somebody has to do something.
+ */
+export async function healthCheck(options: { askPlatform?: boolean } = {}): Promise<HealthReport> {
+  const delivered = await drainChannelOutbox();
+
+  let report = await channelDiagnostics(options);
+  let resubscribed = 0;
+  const unsubscribed = report.accounts.some(
+    (a) => a.active && a.platform?.tokenValid && !(a.platform.subscribedFields ?? []).includes('messages'),
+  );
+  if (unsubscribed) {
+    resubscribed = (await resubscribeInstagram()).filter((r) => r.ok).length;
+    report = await channelDiagnostics(options);
+  }
+
+  const problems: string[] = [];
+  const soon = Date.now() + 7 * 86_400_000;
+
+  for (const account of report.accounts) {
+    if (!account.active) continue;
+    const name = account.platform?.username ? `@${account.platform.username}` : (account.displayName ?? account.channel);
+
+    if (!account.hasToken) {
+      problems.push(`${name}: not connected. It needs to be connected again before it can reply.`);
+      continue;
+    }
+    if (account.platform && !account.platform.tokenValid) {
+      problems.push(
+        `${name}: Instagram is refusing our access. Check the account is still a Professional (Business or Creator) ` +
+          `account, then reconnect it if that does not fix it. Instagram said: ${account.platform.error ?? 'no reason given'}`,
+      );
+      continue;
+    }
+    if (account.platform && !(account.platform.subscribedFields ?? []).includes('messages')) {
+      problems.push(`${name}: Instagram is not sending us its messages, and re-subscribing did not fix it.`);
+    }
+    if (account.tokenExpiresAt && new Date(account.tokenExpiresAt).getTime() < soon) {
+      problems.push(`${name}: its access expires on ${account.tokenExpiresAt.slice(0, 10)}. Reconnect it before then.`);
+    }
+  }
+
+  // Replies that still did not go out, after the delivery attempt above.
+  for (const tenantId of await listActiveTenantIds()) {
+    const [row] = await withTenant(tenantId, (db) =>
+      db
+        .select({
+          failed: sql<number>`count(*) filter (where ${channelMessages.status} = 'failed' and ${channelMessages.createdAt} >= now() - interval '2 hours')::int`,
+          stuck: sql<number>`count(*) filter (where ${channelMessages.status} in ('queued', 'sending') and ${channelMessages.createdAt} < now() - interval '10 minutes' and ${channelMessages.createdAt} >= now() - interval '24 hours')::int`,
+          lastError: sql<string | null>`(array_agg(${channelMessages.lastError} order by ${channelMessages.createdAt} desc) filter (where ${channelMessages.status} in ('failed', 'queued', 'sending') and ${channelMessages.lastError} is not null and ${channelMessages.createdAt} >= now() - interval '24 hours'))[1]`,
+        })
+        .from(channelMessages)
+        .where(eq(channelMessages.tenantId, db.tenantId)),
+    );
+    if (row && (row.failed > 0 || row.stuck > 0)) {
+      const parts = [
+        row.failed > 0 ? `${row.failed} ${row.failed === 1 ? 'reply' : 'replies'} could not be sent in the last 2 hours` : '',
+        row.stuck > 0 ? `${row.stuck} ${row.stuck === 1 ? 'reply is' : 'replies are'} still waiting to go out` : '',
+      ].filter(Boolean);
+      problems.push(`${parts.join(', and ')}. Last error: ${scrub(row.lastError) ?? 'none recorded'}`);
+    }
+  }
+
+  return {
+    ok: problems.length === 0,
+    checkedAt: new Date().toISOString(),
+    problems,
+    repaired: { repliesDelivered: delivered.accepted, resubscribed },
+  };
 }

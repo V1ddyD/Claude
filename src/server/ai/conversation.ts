@@ -1,5 +1,5 @@
 import 'server-only';
-import type Anthropic from '@anthropic-ai/sdk';
+import Anthropic from '@anthropic-ai/sdk';
 import { and, eq, asc, sql } from 'drizzle-orm';
 import { conversations, messages as messagesTable, vehicleModels } from '@/server/db/schema';
 import { withTenant, type TenantDb } from '@/server/db/tenant-db';
@@ -12,7 +12,7 @@ import { buildSystemPrompt } from '@/server/ai/prompts/system';
 import { buildPinnedFacts } from '@/server/ai/context';
 import { formatMoney } from '@/server/services/pricing';
 import { hasAiBudget, recordAiUsage } from '@/server/services/limits';
-import { AppError } from '@/server/errors';
+import { AppError, isAppError } from '@/server/errors';
 
 /**
  * Pass A — the customer conversation.
@@ -103,6 +103,8 @@ export interface ConversationReply {
   receipt?: Receipt;
 }
 
+type RespondParams = Parameters<typeof respondToMessage>[0];
+
 export async function respondToMessage(params: {
   tenantId: string;
   conversationId: string;
@@ -113,9 +115,7 @@ export async function respondToMessage(params: {
   client?: ModelClient | null;
   stream?: ConversationStream;
 }): Promise<ConversationReply> {
-  const tenant = await getTenantById(params.tenantId);
   let client = params.client !== undefined ? params.client : modelClient();
-  const now = params.now ?? new Date();
 
   // A dealership that has spent its monthly budget falls back to the scripted
   // assistant rather than to a dead end. It costs nothing to run and still
@@ -128,6 +128,55 @@ export async function respondToMessage(params: {
   ) {
     client = ruleBasedClient();
   }
+
+  if (!client || client instanceof RuleBasedModel) return respondWith(params, client);
+
+  // The model is one more service that can be down. When it cannot answer,
+  // after the SDK's own retries, the scripted assistant answers instead: a
+  // plainer reply, never silence. The failed attempt's transaction has rolled
+  // back, so the scripted turn starts from exactly the same state.
+  let streamed = false;
+  const stream = params.stream?.onDelta
+    ? {
+        ...params.stream,
+        onDelta: (text: string) => {
+          streamed = true;
+          params.stream!.onDelta!(text);
+        },
+      }
+    : params.stream;
+
+  try {
+    return await respondWith({ ...params, stream }, client);
+  } catch (error) {
+    if (!isModelFailure(error)) throw error;
+    console.warn(
+      `[conversation] ${params.requestId} the model could not answer; the scripted assistant is answering instead`,
+      error instanceof Error ? error.message : error,
+    );
+    // Anything already on the customer's screen stays there; the scripted
+    // answer starts on its own line rather than running into it.
+    if (streamed) params.stream?.onDelta?.('\n\n');
+    const reply = await respondWith(params, ruleBasedClient());
+    return { ...reply, degraded: true };
+  }
+}
+
+/**
+ * The model failed, as opposed to our own code or database.
+ *
+ * An API error (overloaded, rate limited, a 5xx, a timeout, no connection),
+ * or the model finishing without an answer. Anything else is a bug the
+ * scripted assistant would only hit again, and is raised as it is.
+ */
+function isModelFailure(error: unknown): boolean {
+  if (error instanceof Anthropic.APIError) return true;
+  return isAppError(error) && error.code === 'DEPENDENCY_UNAVAILABLE';
+}
+
+async function respondWith(params: RespondParams, client: ModelClient | null): Promise<ConversationReply> {
+  const tenant = await getTenantById(params.tenantId);
+  const now = params.now ?? new Date();
 
   if (!client) {
     // Degraded mode. The customer gets an honest answer and a route to a

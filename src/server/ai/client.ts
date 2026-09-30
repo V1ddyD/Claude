@@ -67,7 +67,9 @@ class AnthropicModelClient implements ModelClient {
     this.client = new Anthropic({
       ...(apiKey ? { apiKey } : {}),
       maxRetries: 2,
-      timeout: 60_000,
+      // Per attempt. Three attempts at most, so a model that hangs gives up in
+      // time for the scripted assistant to answer within the same request.
+      timeout: 30_000,
     });
   }
 

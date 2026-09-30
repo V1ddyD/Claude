@@ -52,6 +52,9 @@ export interface ChannelProvider {
 /** Pinned rather than floating: a version bump is a decision, not a surprise. */
 const GRAPH_VERSION = 'v26.0';
 
+/** How long one send to the platform may take before it is abandoned and retried. */
+const SEND_TIMEOUT_MS = 15_000;
+
 /**
  * Where a reply is posted, by channel.
  *
@@ -101,6 +104,9 @@ class MetaChannelProvider implements ChannelProvider {
             recipient: { id: message.recipientExternalId },
             message: { text: message.body },
           }),
+          // A platform that hangs rather than answering is given up on and
+          // retried, like any other error, instead of holding the reply.
+          signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
         },
       );
 

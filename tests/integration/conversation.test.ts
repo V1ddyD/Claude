@@ -5,6 +5,7 @@ import { ScriptedModel } from '../helpers/scripted-model';
 import { SINCLAIR_TENANT_ID } from '../../db/seeds/sinclair';
 import { closeConnections } from '../../src/server/db/client';
 import { withTenant } from '../../src/server/db/tenant-db';
+import { APIConnectionError } from '@anthropic-ai/sdk';
 import { respondToMessage } from '../../src/server/ai/conversation';
 import { extractAndScore, ensureConversation } from '../../src/server/ai/extraction';
 import { getAvailableTestDriveSlots } from '../../src/server/services/booking';
@@ -339,5 +340,43 @@ describe('extraction and scoring', () => {
       SELECT budget_cents FROM leads WHERE conversation_id = ${conversationId}
     `;
     expect(lead!.budget_cents).toBeNull();
+  });
+});
+
+describe('when the model is down', () => {
+  /** A model that fails the way the API does when it is overloaded or unreachable. */
+  const downModel = {
+    converse: async () => { throw new APIConnectionError({ message: 'Connection error.' }); },
+    stream: async () => { throw new APIConnectionError({ message: 'Connection error.' }); },
+  };
+
+  it('answers with the scripted assistant rather than not at all', async () => {
+    const conversationId = await newConversation();
+    const reply = await respondToMessage({
+      tenantId: SINCLAIR_TENANT_ID, conversationId, visitorId,
+      userMessage: 'what are your opening hours?', requestId: 'test', client: downModel,
+    });
+
+    expect(reply.mode).toBe('scripted');
+    expect(reply.degraded).toBe(true);
+    expect(reply.text.length).toBeGreaterThan(0);
+
+    // Recorded once, by the turn that answered: the failed attempt left nothing behind.
+    const rows = await admin<{ role: string }[]>`
+      SELECT role FROM messages WHERE conversation_id = ${conversationId} AND role = 'user'
+    `;
+    expect(rows).toHaveLength(1);
+  });
+
+  it('still raises a failure that is not the model', async () => {
+    const conversationId = await newConversation();
+    const broken = {
+      converse: async () => { throw new TypeError('a bug of ours'); },
+      stream: async () => { throw new TypeError('a bug of ours'); },
+    };
+    await expect(respondToMessage({
+      tenantId: SINCLAIR_TENANT_ID, conversationId, visitorId,
+      userMessage: 'hello', requestId: 'test', client: broken,
+    })).rejects.toThrow('a bug of ours');
   });
 });

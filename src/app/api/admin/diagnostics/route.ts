@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { channelDiagnostics, resubscribeInstagram } from '@/server/channels/diagnostics';
+import { channelDiagnostics, healthCheck, resubscribeInstagram } from '@/server/channels/diagnostics';
 import { env } from '@/server/config/env';
 
 export const runtime = 'nodejs';
@@ -31,12 +31,28 @@ export async function GET(request: NextRequest) {
   }
 }
 
-/** Re-subscribes connected Instagram accounts to message webhooks. */
+/**
+ * POST ?action=check: the hourly check. Delivers stuck replies, repairs what
+ * it can, and reports what a person still has to fix.
+ * POST with no action: re-subscribes connected Instagram accounts to message
+ * webhooks.
+ */
 export async function POST(request: NextRequest) {
   const expected = env.DIAGNOSTICS_TOKEN;
   const supplied = request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
   if (!expected || !matches(supplied, expected)) {
     return NextResponse.json({ error: 'Not found.' }, { status: 404 });
+  }
+  if (new URL(request.url).searchParams.get('action') === 'check') {
+    try {
+      return NextResponse.json(await healthCheck(), { headers: { 'Cache-Control': 'no-store' } });
+    } catch (error) {
+      console.error('[diagnostics:check]', error);
+      return NextResponse.json(
+        { ok: false, problems: ['The check itself failed: the server or its database may be down.'] },
+        { status: 500 },
+      );
+    }
   }
   try {
     return NextResponse.json({ resubscribed: await resubscribeInstagram() });
