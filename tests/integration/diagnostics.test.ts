@@ -95,3 +95,18 @@ describe('the hourly check', () => {
     expect(text).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789');
   });
 });
+
+describe('the public messaging check', () => {
+  it('answers yes or no and nothing else, at most once a minute', async () => {
+    const { GET } = await import('../../src/app/api/health/messaging/route');
+    await admin`DELETE FROM rate_limit_counters WHERE bucket = 'messaging-health'`;
+
+    const first = await GET();
+    const body = (await first.json()) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(['ok']);
+    expect(typeof body.ok).toBe('boolean');
+
+    const second = await GET();
+    expect(second.status).toBe(429);
+  });
+});
