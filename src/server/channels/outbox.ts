@@ -29,6 +29,12 @@ export interface QueuedChannelMessage {
   body: string;
   sentByType?: 'ai' | 'staff' | 'system';
   sentById?: string;
+  /**
+   * The platform's id for the customer message this answers. Part of the
+   * dedupe key, so the same sentence given as the answer to two different
+   * messages is two replies, not one.
+   */
+  inReplyTo?: string;
 }
 
 /**
@@ -37,10 +43,15 @@ export interface QueuedChannelMessage {
  * Takes a TenantDb rather than opening its own, which is the point: a message
  * scheduled for a conversation turn that rolls back must roll back with it.
  *
- * The dedupe key is derived from the conversation and the body, so a retried
- * turn reuses its message instead of sending the customer the same sentence
- * twice. `onConflictDoNothing` makes that a no-op rather than an error the
- * caller has to distinguish from a real failure.
+ * The dedupe key is derived from the conversation, the message being answered
+ * and the body, so a retried turn reuses its message instead of sending the
+ * customer the same sentence twice. `onConflictDoNothing` makes that a no-op
+ * rather than an error the caller has to distinguish from a real failure.
+ *
+ * The message being answered has to be part of it. Without it, a customer who
+ * got an answer once could never get that same answer again in the same
+ * conversation: the second copy was dropped as a "duplicate" and they were
+ * left with no reply at all. A scripted assistant repeats itself often.
  */
 export async function queueChannelMessage(
   db: TenantDb,
@@ -55,7 +66,7 @@ export async function queueChannelMessage(
   const body = toPlainText(message.body);
 
   const dedupeKey = createHash('sha256')
-    .update([message.conversationId, message.recipientExternalId, body].join('|'))
+    .update([message.conversationId, message.recipientExternalId, message.inReplyTo ?? '', body].join('|'))
     .digest('hex')
     .slice(0, 48);
 
@@ -190,7 +201,7 @@ async function sendOne(message: {
       return false;
     }
 
-    const result = await channelProvider().send({
+    const result = await sendWithQuickRetries({
       channel: message.channel,
       recipientExternalId: message.recipientExternalId,
       senderExternalId: account.externalAccountId,
@@ -234,4 +245,31 @@ async function sendOne(message: {
 
     return false;
   });
+}
+
+/**
+ * A platform blip is retried on the spot, a moment apart.
+ *
+ * Meta's send endpoint returns the odd 5xx that clears within seconds. The
+ * backed-off retry in the outbox is the safety net, but it only runs when the
+ * worker next runs, and on this plan that can be the next customer message or
+ * the next day: a customer waiting that long has already given up. Two quick
+ * retries catch almost every blip while the customer is still looking.
+ */
+const QUICK_RETRY_DELAYS_MS = [1_000, 3_000];
+
+let pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Test seam: retries without the wait. */
+export function setRetryPause(next: ((ms: number) => Promise<void>) | null): void {
+  pause = next ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+}
+
+async function sendWithQuickRetries(input: Parameters<ReturnType<typeof channelProvider>['send']>[0]) {
+  let result = await channelProvider().send(input);
+  for (const delay of QUICK_RETRY_DELAYS_MS) {
+    if (result.accepted || !result.retryable || isWindowClosed(result.error)) break;
+    await pause(delay);
+    result = await channelProvider().send(input);
+  }
+  return result;
 }

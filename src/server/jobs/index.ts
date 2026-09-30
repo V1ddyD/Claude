@@ -91,6 +91,16 @@ export async function runWorker(limit = 10): Promise<WorkerReport> {
         failed++;
       }
     }
+
+    // Every run delivers whatever replies are due, not only the ones a job
+    // names. A reply whose send failed is put back with a retry time, and no
+    // job is queued for that retry: without this, it was only ever retried if
+    // another message happened to come in, and otherwise was never sent.
+    try {
+      await drainChannelOutbox(tenantId);
+    } catch (error) {
+      console.error('[worker:channel-outbox]', error);
+    }
   }
 
   return { claimed, succeeded, failed };

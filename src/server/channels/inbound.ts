@@ -180,6 +180,7 @@ export async function receiveChannelMessage(
       conversationId: session.conversationId,
       recipientExternalId: message.externalUserId,
       body: reply.text,
+      inReplyTo: message.externalMessageId,
     });
     await enqueue(db, 'send_channel_message', {});
   });

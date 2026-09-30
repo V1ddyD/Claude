@@ -18,7 +18,8 @@ import { receiveChannelMessage } from '../../src/server/channels/inbound';
 import {
   connectChannelAccount, listChannelAccounts, disconnectChannelAccount,
 } from '../../src/server/channels/accounts';
-import { drainChannelOutbox } from '../../src/server/channels/outbox';
+import { drainChannelOutbox, setRetryPause } from '../../src/server/channels/outbox';
+import { runWorker } from '../../src/server/jobs';
 import {
   setChannelProvider, resetChannelProvider,
   type ChannelProvider, type ChannelSendResult, type OutgoingChannelMessage,
@@ -105,6 +106,7 @@ beforeAll(async () => {
 afterEach(() => {
   setModelClient(null);
   resetChannelProvider();
+  setRetryPause(null);
 });
 
 afterAll(async () => {
@@ -341,6 +343,78 @@ describe('the outbound outbox', () => {
     // went quiet for a day, which is not an outage and not our bug. Retrying
     // cannot succeed — the window only reopens when they write again.
     expect(row?.status).toBe('expired');
+  });
+
+  it('sends the same answer again when it answers a different message', async () => {
+    // A scripted assistant repeats itself. The second identical answer was
+    // once dropped as a duplicate, leaving the customer with no reply at all.
+    setModelClient(new ScriptedModel([{ text: 'We are open until 6pm.' }, { text: 'We are open until 6pm.' }]));
+    const { sender, mid } = nextIds();
+    const base = { channel: 'instagram' as const, externalAccountId: ACCOUNT, externalUserId: sender, requestId: 'test' };
+
+    const first = await receiveChannelMessage({ ...base, externalMessageId: mid, text: 'what time do you close?' });
+    const second = await receiveChannelMessage({ ...base, externalMessageId: `${mid}.again`, text: 'what time do you close today?' });
+    expect(first.status).toBe('replied');
+    expect(second.status).toBe('replied');
+    if (first.status !== 'replied') return;
+
+    const rows = await admin<{ count: number }[]>`
+      SELECT count(*)::int FROM channel_messages WHERE conversation_id = ${first.conversationId}
+    `;
+    expect(rows[0]?.count).toBe(2);
+  });
+
+  it('rides out a brief platform error while the customer is still waiting', async () => {
+    setModelClient(new ScriptedModel([{ text: 'Here you go.' }]));
+    const { sender, mid } = nextIds();
+    const outcome = await receiveChannelMessage({
+      channel: 'instagram', externalAccountId: ACCOUNT, externalUserId: sender,
+      externalMessageId: mid, text: 'price of the S5?', requestId: 'test',
+    });
+    if (outcome.status !== 'replied') throw new Error(outcome.status);
+
+    setRetryPause(async () => {});
+    // Meta's 503 once, then fine.
+    const provider: RecordingProvider = new RecordingProvider((n): ChannelSendResult => {
+      const mine = provider.sent.filter((m) => m.recipientExternalId === sender).length;
+      return mine === 1 && provider.sent.at(-1)?.recipientExternalId === sender
+        ? { accepted: false, error: '503 <h1>5xx Server Error</h1>', retryable: true }
+        : { accepted: true, providerMessageId: `mid.ok.${n}` };
+    });
+    setChannelProvider(provider);
+
+    await drainChannelOutbox(SINCLAIR_TENANT_ID);
+
+    const [row] = await admin<{ status: string; attempts: number }[]>`
+      SELECT status, attempts FROM channel_messages WHERE conversation_id = ${outcome.conversationId}
+    `;
+    expect(row?.status).toBe('accepted');
+    expect(provider.sent.filter((m) => m.recipientExternalId === sender)).toHaveLength(2);
+  });
+
+  it('delivers a reply waiting for a retry the next time the worker runs, job or no job', async () => {
+    setModelClient(new ScriptedModel([{ text: 'Sorry for the wait.' }]));
+    const { sender, mid } = nextIds();
+    const outcome = await receiveChannelMessage({
+      channel: 'instagram', externalAccountId: ACCOUNT, externalUserId: sender,
+      externalMessageId: mid, text: 'hello?', requestId: 'test',
+    });
+    if (outcome.status !== 'replied') throw new Error(outcome.status);
+
+    // As a failed send leaves it: back in the queue, due, and no job naming it.
+    await admin`
+      UPDATE channel_messages SET attempts = 1, last_error = '503', scheduled_for = now() - interval '1 minute'
+      WHERE conversation_id = ${outcome.conversationId}
+    `;
+    await admin`DELETE FROM job_queue WHERE kind = 'send_channel_message' AND status = 'pending'`;
+
+    setChannelProvider(new RecordingProvider({ accepted: true, providerMessageId: 'mid.late' }));
+    await runWorker();
+
+    const [row] = await admin<{ status: string }[]>`
+      SELECT status FROM channel_messages WHERE conversation_id = ${outcome.conversationId}
+    `;
+    expect(row?.status).toBe('accepted');
   });
 });
 
